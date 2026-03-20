@@ -42,9 +42,33 @@ ironguard/
       main.rs             #   clap-based CLI with all commands
 ```
 
-## Quick Start
+## Installation
 
-### Build
+### Homebrew (macOS)
+
+```bash
+brew tap dickwu/tap
+brew install ironguard
+```
+
+### Download Binary
+
+Pre-built binaries for macOS and Linux are available on the [releases page](https://github.com/dickwu/ironguard/releases):
+
+| Platform | Binary |
+|----------|--------|
+| macOS Apple Silicon | `ironguard-macos-aarch64.tar.gz` |
+| macOS Intel | `ironguard-macos-x86_64.tar.gz` |
+| Linux x86_64 | `ironguard-linux-x86_64.tar.gz` |
+| Linux ARM64 | `ironguard-linux-aarch64.tar.gz` |
+
+```bash
+# Example: download and install on macOS Apple Silicon
+curl -sL https://github.com/dickwu/ironguard/releases/latest/download/ironguard-macos-aarch64.tar.gz | tar xz
+sudo mv ironguard /usr/local/bin/
+```
+
+### Build from Source
 
 ```bash
 cargo build --release
