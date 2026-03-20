@@ -81,8 +81,7 @@ fn base64_decode(input: &str) -> Result<Vec<u8>> {
 
 /// Minimal base64 encoder (standard alphabet, with padding).
 pub fn base64_encode(data: &[u8]) -> String {
-    const TABLE: &[u8] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     let chunks = data.len() / 3;

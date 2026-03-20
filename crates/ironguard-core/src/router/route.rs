@@ -1,7 +1,7 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use spin::RwLock;
 use ip_network_table_deps_treebitmap::IpLookupTable;
+use spin::RwLock;
 
 const VERSION_IP4: u8 = 4;
 const VERSION_IP6: u8 = 6;
@@ -210,22 +210,13 @@ mod tests {
         rt.insert("10.0.0.0".parse().unwrap(), 24, 1);
         rt.insert("10.0.1.0".parse().unwrap(), 24, 2);
 
-        let pkt = make_ipv4_packet(
-            "127.0.0.1".parse().unwrap(),
-            "10.0.0.5".parse().unwrap(),
-        );
+        let pkt = make_ipv4_packet("127.0.0.1".parse().unwrap(), "10.0.0.5".parse().unwrap());
         assert_eq!(rt.get_route(&pkt), Some(1));
 
-        let pkt = make_ipv4_packet(
-            "127.0.0.1".parse().unwrap(),
-            "10.0.1.5".parse().unwrap(),
-        );
+        let pkt = make_ipv4_packet("127.0.0.1".parse().unwrap(), "10.0.1.5".parse().unwrap());
         assert_eq!(rt.get_route(&pkt), Some(2));
 
-        let pkt = make_ipv4_packet(
-            "127.0.0.1".parse().unwrap(),
-            "10.0.2.5".parse().unwrap(),
-        );
+        let pkt = make_ipv4_packet("127.0.0.1".parse().unwrap(), "10.0.2.5".parse().unwrap());
         assert_eq!(rt.get_route(&pkt), None);
     }
 
@@ -235,22 +226,13 @@ mod tests {
         rt.insert("2001:db8::".parse().unwrap(), 32, 1);
         rt.insert("2001:db9::".parse().unwrap(), 32, 2);
 
-        let pkt = make_ipv6_packet(
-            "::1".parse().unwrap(),
-            "2001:db8::1".parse().unwrap(),
-        );
+        let pkt = make_ipv6_packet("::1".parse().unwrap(), "2001:db8::1".parse().unwrap());
         assert_eq!(rt.get_route(&pkt), Some(1));
 
-        let pkt = make_ipv6_packet(
-            "::1".parse().unwrap(),
-            "2001:db9::1".parse().unwrap(),
-        );
+        let pkt = make_ipv6_packet("::1".parse().unwrap(), "2001:db9::1".parse().unwrap());
         assert_eq!(rt.get_route(&pkt), Some(2));
 
-        let pkt = make_ipv6_packet(
-            "::1".parse().unwrap(),
-            "2001:dba::1".parse().unwrap(),
-        );
+        let pkt = make_ipv6_packet("::1".parse().unwrap(), "2001:dba::1".parse().unwrap());
         assert_eq!(rt.get_route(&pkt), None);
     }
 
@@ -261,17 +243,11 @@ mod tests {
         rt.insert("10.0.0.0".parse().unwrap(), 24, 2);
 
         // Packet to 10.0.0.5 should match /24 (peer 2), not /8
-        let pkt = make_ipv4_packet(
-            "127.0.0.1".parse().unwrap(),
-            "10.0.0.5".parse().unwrap(),
-        );
+        let pkt = make_ipv4_packet("127.0.0.1".parse().unwrap(), "10.0.0.5".parse().unwrap());
         assert_eq!(rt.get_route(&pkt), Some(2));
 
         // Packet to 10.1.0.5 should match /8 (peer 1)
-        let pkt = make_ipv4_packet(
-            "127.0.0.1".parse().unwrap(),
-            "10.1.0.5".parse().unwrap(),
-        );
+        let pkt = make_ipv4_packet("127.0.0.1".parse().unwrap(), "10.1.0.5".parse().unwrap());
         assert_eq!(rt.get_route(&pkt), Some(1));
     }
 
@@ -282,18 +258,12 @@ mod tests {
         rt.insert("10.0.1.0".parse().unwrap(), 24, 2);
 
         // Source 10.0.0.5 belongs to peer 1
-        let pkt = make_ipv4_packet(
-            "10.0.0.5".parse().unwrap(),
-            "192.168.1.1".parse().unwrap(),
-        );
+        let pkt = make_ipv4_packet("10.0.0.5".parse().unwrap(), "192.168.1.1".parse().unwrap());
         assert!(rt.check_route(&1, &pkt));
         assert!(!rt.check_route(&2, &pkt));
 
         // Source 10.0.1.5 belongs to peer 2
-        let pkt = make_ipv4_packet(
-            "10.0.1.5".parse().unwrap(),
-            "192.168.1.1".parse().unwrap(),
-        );
+        let pkt = make_ipv4_packet("10.0.1.5".parse().unwrap(), "192.168.1.1".parse().unwrap());
         assert!(!rt.check_route(&1, &pkt));
         assert!(rt.check_route(&2, &pkt));
     }
@@ -303,10 +273,7 @@ mod tests {
         let rt: RoutingTable<u32> = RoutingTable::new();
         rt.insert("2001:db8::".parse().unwrap(), 32, 1);
 
-        let pkt = make_ipv6_packet(
-            "2001:db8::1".parse().unwrap(),
-            "::1".parse().unwrap(),
-        );
+        let pkt = make_ipv6_packet("2001:db8::1".parse().unwrap(), "::1".parse().unwrap());
         assert!(rt.check_route(&1, &pkt));
         assert!(!rt.check_route(&2, &pkt));
     }
@@ -340,10 +307,7 @@ mod tests {
         // Insert with host bits set - should be masked to 10.0.0.0/24
         rt.insert("10.0.0.128".parse().unwrap(), 24, 1);
 
-        let pkt = make_ipv4_packet(
-            "127.0.0.1".parse().unwrap(),
-            "10.0.0.1".parse().unwrap(),
-        );
+        let pkt = make_ipv4_packet("127.0.0.1".parse().unwrap(), "10.0.0.1".parse().unwrap());
         assert_eq!(rt.get_route(&pkt), Some(1));
     }
 

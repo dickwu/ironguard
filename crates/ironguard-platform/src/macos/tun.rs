@@ -2,8 +2,8 @@ use std::io;
 use std::os::fd::AsRawFd;
 use std::sync::Arc;
 
-use tokio::io::unix::AsyncFd;
 use tokio::io::Interest;
+use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc;
 
 use crate::tun;
@@ -92,9 +92,7 @@ impl tun::Tun for MacosTun {
 impl tun::PlatformTun for MacosTun {
     type Status = MacosTunStatus;
 
-    fn create(
-        name: &str,
-    ) -> Result<(Vec<Self::Reader>, Self::Writer, Self::Status), Self::Error> {
+    fn create(name: &str) -> Result<(Vec<Self::Reader>, Self::Writer, Self::Status), Self::Error> {
         // tun-rs requires utun names on macOS
         let tun_name = if name.starts_with("utun") {
             name.to_string()
@@ -112,9 +110,9 @@ impl tun::PlatformTun for MacosTun {
             builder = builder.name(&tun_name);
         }
 
-        let device = builder.build_sync().map_err(|e| {
-            MacosTunError::Device(format!("failed to create TUN device: {e}"))
-        })?;
+        let device = builder
+            .build_sync()
+            .map_err(|e| MacosTunError::Device(format!("failed to create TUN device: {e}")))?;
 
         // Set non-blocking for use with AsyncFd
         device

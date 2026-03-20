@@ -13,10 +13,7 @@
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use chacha20poly1305::{
-    KeyInit, XChaCha20Poly1305,
-    aead::Aead,
-};
+use chacha20poly1305::{KeyInit, XChaCha20Poly1305, aead::Aead};
 use parking_lot::RwLock;
 use rand::RngCore;
 use subtle::ConstantTimeEq;
@@ -121,7 +118,13 @@ fn xchacha20_seal(
 ) -> Vec<u8> {
     let cipher = XChaCha20Poly1305::new(key.into());
     cipher
-        .encrypt(nonce.into(), chacha20poly1305::aead::Payload { msg: plaintext, aad: ad })
+        .encrypt(
+            nonce.into(),
+            chacha20poly1305::aead::Payload {
+                msg: plaintext,
+                aad: ad,
+            },
+        )
         .expect("XChaCha20Poly1305 encryption failed")
 }
 
@@ -133,7 +136,13 @@ fn xchacha20_open(
 ) -> Result<Vec<u8>, HandshakeError> {
     let cipher = XChaCha20Poly1305::new(key.into());
     cipher
-        .decrypt(nonce.into(), chacha20poly1305::aead::Payload { msg: ciphertext, aad: ad })
+        .decrypt(
+            nonce.into(),
+            chacha20poly1305::aead::Payload {
+                msg: ciphertext,
+                aad: ad,
+            },
+        )
         .map_err(|_| HandshakeError::DecryptionFailure)
 }
 
@@ -190,7 +199,10 @@ impl Generator {
         }
         let mut value = [0u8; SIZE_COOKIE];
         value.copy_from_slice(&plaintext);
-        self.cookie = Some(Cookie { value, birth: Instant::now() });
+        self.cookie = Some(Cookie {
+            value,
+            birth: Instant::now(),
+        });
         Ok(())
     }
 }
@@ -227,7 +239,11 @@ impl Validator {
     pub fn check_mac1(&self, inner: &[u8], macs: &MacsFooter) -> Result<(), HandshakeError> {
         let expected = blake2s_mac(&self.mac1_key, &[inner]);
         let valid: bool = expected.ct_eq(&macs.f_mac1).into();
-        if valid { Ok(()) } else { Err(HandshakeError::InvalidMac1) }
+        if valid {
+            Ok(())
+        } else {
+            Err(HandshakeError::InvalidMac1)
+        }
     }
 
     /// Verify MAC2 for an incoming message from `src`.
@@ -371,13 +387,18 @@ mod tests {
         validator.create_cookie_reply(1234, &src, &macs, &mut reply);
 
         // 3. Generator processes the reply
-        generator.process(&reply).expect("CookieReply should be accepted");
+        generator
+            .process(&reply)
+            .expect("CookieReply should be accepted");
 
         // 4. Generator now produces a valid MAC2
         let inner2 = b"second message";
         let mut macs2 = MacsFooter::default();
         generator.generate(inner2, &mut macs2);
-        assert_ne!(macs2.f_mac2, [0u8; SIZE_MAC], "MAC2 should be set after cookie");
+        assert_ne!(
+            macs2.f_mac2, [0u8; SIZE_MAC],
+            "MAC2 should be set after cookie"
+        );
 
         // 5. Validator verifies MAC2
         validator.check_mac1(inner2, &macs2).unwrap();

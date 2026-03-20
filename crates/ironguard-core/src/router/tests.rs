@@ -1,5 +1,5 @@
 use std::ops::Deref;
-use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -196,8 +196,7 @@ fn make_ipv6_packet(src: std::net::Ipv6Addr, dst: std::net::Ipv6Addr, body_size:
 async fn test_outbound_routing() {
     // Create a router with a dummy TUN and void UDP
     let (_, tun_writer, _, _) = dummy_tun::create_pair();
-    let router: TestRouter =
-        DeviceHandle::new(1, tun_writer);
+    let router: TestRouter = DeviceHandle::new(1, tun_writer);
 
     // Create a void UDP writer (sends into the void)
     let (_, udp_writer, _, _, _, _) = dummy_udp::create_pair();
@@ -229,8 +228,7 @@ async fn test_outbound_routing() {
 #[tokio::test]
 async fn test_no_route_fails() {
     let (_, tun_writer, _, _) = dummy_tun::create_pair();
-    let router: TestRouter =
-        DeviceHandle::new(1, tun_writer);
+    let router: TestRouter = DeviceHandle::new(1, tun_writer);
 
     // No peers added - routing should fail
     let ip_pkt = make_ipv4_packet(
@@ -245,8 +243,7 @@ async fn test_no_route_fails() {
 #[tokio::test]
 async fn test_no_key_triggers_need_key() {
     let (_, tun_writer, _, _) = dummy_tun::create_pair();
-    let router: TestRouter =
-        DeviceHandle::new(1, tun_writer);
+    let router: TestRouter = DeviceHandle::new(1, tun_writer);
 
     let opaque = Opaque::new();
     let peer = router.new_peer(opaque.clone());
@@ -274,10 +271,8 @@ async fn test_bidirectional() {
     let (_, tun_writer1, _, _) = dummy_tun::create_pair();
     let (_, tun_writer2, _, _) = dummy_tun::create_pair();
 
-    let router1: TestRouter =
-        DeviceHandle::new(1, tun_writer1);
-    let router2: TestRouter =
-        DeviceHandle::new(1, tun_writer2);
+    let router1: TestRouter = DeviceHandle::new(1, tun_writer1);
+    let router2: TestRouter = DeviceHandle::new(1, tun_writer2);
 
     // Connect via UDP pair
     let (udp_readers1, udp_writer1, _, udp_readers2, udp_writer2, _) = dummy_udp::create_pair();
@@ -313,7 +308,9 @@ async fn test_bidirectional() {
     buf.truncate(len);
 
     // Pass to router1 for decryption
-    router1.recv(from, buf).expect("router1 should process the packet");
+    router1
+        .recv(from, buf)
+        .expect("router1 should process the packet");
 
     // peer1 should fire recv and key_confirmed events
     assert!(
@@ -327,7 +324,10 @@ async fn test_bidirectional() {
     );
 
     // Now peer1 has an endpoint (learned from the incoming packet)
-    assert!(peer1.get_endpoint().is_some(), "peer1 should have learned endpoint");
+    assert!(
+        peer1.get_endpoint().is_some(),
+        "peer1 should have learned endpoint"
+    );
 
     // Send a real packet from peer1 -> peer2
     let ip_pkt = make_ipv4_packet(
@@ -371,10 +371,8 @@ async fn test_replay_rejected() {
     let (_, tun_writer1, _, _) = dummy_tun::create_pair();
     let (_, tun_writer2, _, _) = dummy_tun::create_pair();
 
-    let router1: TestRouter =
-        DeviceHandle::new(1, tun_writer1);
-    let router2: TestRouter =
-        DeviceHandle::new(1, tun_writer2);
+    let router1: TestRouter = DeviceHandle::new(1, tun_writer1);
+    let router2: TestRouter = DeviceHandle::new(1, tun_writer2);
 
     let (udp_readers1, udp_writer1, _, _, udp_writer2, _) = dummy_udp::create_pair();
     router1.set_outbound_writer(udp_writer1);
@@ -417,20 +415,25 @@ async fn test_replay_rejected() {
 
     // Replay the same packet - should be processed but replay protection drops it
     // (no recv callback should fire for the replay)
-    router1.recv(replay_from, replay_buf).expect("recv should not error");
+    router1
+        .recv(replay_from, replay_buf)
+        .expect("recv should not error");
 
     // The packet goes through the pipeline but replay check drops it
     // so no recv event should fire
     // Give a short timeout - no event expected
     std::thread::sleep(Duration::from_millis(100));
-    assert_eq!(opaque1.recv.now(), None, "replayed packet should not generate recv event");
+    assert_eq!(
+        opaque1.recv.now(),
+        None,
+        "replayed packet should not generate recv event"
+    );
 }
 
 #[tokio::test]
 async fn test_outbound_ipv6() {
     let (_, tun_writer, _, _) = dummy_tun::create_pair();
-    let router: TestRouter =
-        DeviceHandle::new(1, tun_writer);
+    let router: TestRouter = DeviceHandle::new(1, tun_writer);
 
     let (_, udp_writer, _, _, _, _) = dummy_udp::create_pair();
     router.set_outbound_writer(udp_writer);
@@ -440,22 +443,20 @@ async fn test_outbound_ipv6() {
     peer.add_allowed_ip("2001:db8::".parse().unwrap(), 32);
     peer.add_keypair(dummy_keypair(true));
 
-    let ip_pkt = make_ipv6_packet(
-        "::1".parse().unwrap(),
-        "2001:db8::1".parse().unwrap(),
-        100,
-    );
+    let ip_pkt = make_ipv6_packet("::1".parse().unwrap(), "2001:db8::1".parse().unwrap(), 100);
     let res = router.send(pad(&ip_pkt));
     assert!(res.is_ok(), "IPv6 routing should succeed");
 
-    assert!(opaque.send.wait(TIMEOUT).is_some(), "send event should fire for IPv6");
+    assert!(
+        opaque.send.wait(TIMEOUT).is_some(),
+        "send event should fire for IPv6"
+    );
 }
 
 #[tokio::test]
 async fn test_keepalive_on_key_add() {
     let (_, tun_writer, _, _) = dummy_tun::create_pair();
-    let router: TestRouter =
-        DeviceHandle::new(1, tun_writer);
+    let router: TestRouter = DeviceHandle::new(1, tun_writer);
 
     let (_, udp_writer, _, _, _, _) = dummy_udp::create_pair();
     router.set_outbound_writer(udp_writer);
@@ -479,5 +480,5 @@ async fn test_keepalive_on_key_add() {
     assert_eq!(size, keepalive_size, "keepalive should be header + tag");
 }
 
-use ironguard_platform::udp::UdpReader;
 use ironguard_platform::endpoint::Endpoint;
+use ironguard_platform::udp::UdpReader;

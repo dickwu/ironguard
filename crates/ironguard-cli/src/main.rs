@@ -2,7 +2,10 @@ use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "ironguard", about = "Modern cross-platform WireGuard implementation")]
+#[command(
+    name = "ironguard",
+    about = "Modern cross-platform WireGuard implementation"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -177,8 +180,8 @@ async fn cmd_up(interface: &str, config_path: &str, foreground: bool) -> Result<
     }
 
     // 3. Create TUN device
-    let (tun_readers, tun_writer, _tun_status) = MacosTun::create(interface)
-        .map_err(|e| anyhow!("failed to create TUN device: {e}"))?;
+    let (tun_readers, tun_writer, _tun_status) =
+        MacosTun::create(interface).map_err(|e| anyhow!("failed to create TUN device: {e}"))?;
 
     // Branch on transport mode
     #[cfg(feature = "quic")]
@@ -234,13 +237,16 @@ async fn cmd_up(interface: &str, config_path: &str, foreground: bool) -> Result<
             eprintln!("  peer {i}: persistent keepalive {ka}s");
         }
 
-        eprintln!("  peer {i}: configured (allowed_ips: {})", peer_cfg.allowed_ips.join(", "));
+        eprintln!(
+            "  peer {i}: configured (allowed_ips: {})",
+            peer_cfg.allowed_ips.join(", ")
+        );
     }
 
     // 7. Bind UDP
     let port = iface_cfg.listen_port.unwrap_or(0);
-    let (udp_readers, udp_writer, owner) = MacosUdp::bind(port)
-        .map_err(|e| anyhow!("failed to bind UDP socket: {e}"))?;
+    let (udp_readers, udp_writer, owner) =
+        MacosUdp::bind(port).map_err(|e| anyhow!("failed to bind UDP socket: {e}"))?;
 
     wg.set_writer(udp_writer);
     for reader in udp_readers {
@@ -282,7 +288,9 @@ async fn cmd_up(interface: &str, config_path: &str, foreground: bool) -> Result<
 #[cfg(all(target_os = "macos", feature = "quic"))]
 async fn cmd_up_quic(
     iface_cfg: &ironguard_config::types::InterfaceConfig,
-    tun_readers: Vec<<ironguard_platform::macos::tun::MacosTun as ironguard_platform::tun::Tun>::Reader>,
+    tun_readers: Vec<
+        <ironguard_platform::macos::tun::MacosTun as ironguard_platform::tun::Tun>::Reader,
+    >,
     tun_writer: <ironguard_platform::macos::tun::MacosTun as ironguard_platform::tun::Tun>::Writer,
     sk_bytes: [u8; 32],
     interface: &str,
@@ -292,7 +300,9 @@ async fn cmd_up_quic(
 
     use ironguard_platform::endpoint::Endpoint;
     use ironguard_platform::macos::tun::MacosTun;
-    use ironguard_platform::quic::{QuicConfig, QuicEndpoint, QuicReader, QuicTransport, QuicUdp, QuicWriter};
+    use ironguard_platform::quic::{
+        QuicConfig, QuicEndpoint, QuicReader, QuicTransport, QuicUdp, QuicWriter,
+    };
 
     let quic_cfg = iface_cfg
         .quic
@@ -368,7 +378,10 @@ async fn cmd_up_quic(
             eprintln!("  peer {i}: persistent keepalive {ka}s");
         }
 
-        eprintln!("  peer {i}: configured (allowed_ips: {})", peer_cfg.allowed_ips.join(", "));
+        eprintln!(
+            "  peer {i}: configured (allowed_ips: {})",
+            peer_cfg.allowed_ips.join(", ")
+        );
     }
 
     // Set QUIC writer and reader.
@@ -483,13 +496,10 @@ fn parse_cidr(cidr: &str) -> Result<(std::net::IpAddr, u32)> {
 
 fn cmd_status(interface: Option<&str>, config_path: Option<&str>) -> Result<()> {
     let content = match config_path {
-        Some(p) => std::fs::read_to_string(p)
-            .map_err(|e| anyhow!("failed to read config: {e}"))?,
+        Some(p) => std::fs::read_to_string(p).map_err(|e| anyhow!("failed to read config: {e}"))?,
         None => std::fs::read_to_string("wg.json")
             .or_else(|_| std::fs::read_to_string("/etc/ironguard/wg.json"))
-            .map_err(|_| {
-                anyhow!("no config found at wg.json or /etc/ironguard/wg.json")
-            })?,
+            .map_err(|_| anyhow!("no config found at wg.json or /etc/ironguard/wg.json"))?,
     };
 
     let cfg: ironguard_config::Config = serde_json::from_str(&content)?;
@@ -534,8 +544,7 @@ fn cmd_pubkey() -> Result<()> {
     std::io::stdin().read_line(&mut input)?;
     let hex_key = input.trim();
 
-    let sk_bytes = hex::decode(hex_key)
-        .map_err(|e| anyhow!("invalid hex private key: {e}"))?;
+    let sk_bytes = hex::decode(hex_key).map_err(|e| anyhow!("invalid hex private key: {e}"))?;
     if sk_bytes.len() != 32 {
         return Err(anyhow!(
             "private key must be 32 bytes, got {}",
@@ -569,8 +578,7 @@ fn cmd_pq_pubkey() -> Result<()> {
     std::io::stdin().read_line(&mut input)?;
     let hex_key = input.trim();
 
-    let dk_bytes = hex::decode(hex_key)
-        .map_err(|e| anyhow!("invalid hex private key: {e}"))?;
+    let dk_bytes = hex::decode(hex_key).map_err(|e| anyhow!("invalid hex private key: {e}"))?;
 
     let kp = PqKeyPair::from_dk_bytes(&dk_bytes)
         .map_err(|e| anyhow!("invalid ML-KEM-768 decapsulation key: {e}"))?;
@@ -580,10 +588,10 @@ fn cmd_pq_pubkey() -> Result<()> {
 }
 
 fn cmd_validate(config_path: &str) -> Result<()> {
-    let content = std::fs::read_to_string(config_path)
-        .map_err(|e| anyhow!("failed to read config: {e}"))?;
-    let cfg: ironguard_config::Config = serde_json::from_str(&content)
-        .map_err(|e| anyhow!("failed to parse config: {e}"))?;
+    let content =
+        std::fs::read_to_string(config_path).map_err(|e| anyhow!("failed to read config: {e}"))?;
+    let cfg: ironguard_config::Config =
+        serde_json::from_str(&content).map_err(|e| anyhow!("failed to parse config: {e}"))?;
 
     let warnings = ironguard_config::validate(&cfg)?;
     if warnings.is_empty() {
@@ -613,15 +621,14 @@ fn cmd_import(conf_path: &str, output_path: &str) -> Result<()> {
 fn cmd_export(json_path: &str, interface: &str, output: Option<&str>) -> Result<()> {
     let content = std::fs::read_to_string(json_path)
         .map_err(|e| anyhow!("failed to read {json_path}: {e}"))?;
-    let config: ironguard_config::Config = serde_json::from_str(&content)
-        .map_err(|e| anyhow!("failed to parse {json_path}: {e}"))?;
+    let config: ironguard_config::Config =
+        serde_json::from_str(&content).map_err(|e| anyhow!("failed to parse {json_path}: {e}"))?;
 
     let conf_str = ironguard_config::export_conf(&config, interface)?;
 
     match output {
         Some(path) => {
-            std::fs::write(path, &conf_str)
-                .map_err(|e| anyhow!("failed to write {path}: {e}"))?;
+            std::fs::write(path, &conf_str).map_err(|e| anyhow!("failed to write {path}: {e}"))?;
             eprintln!("exported {interface} -> {path}");
         }
         None => {

@@ -140,7 +140,8 @@ impl Timers {
         if self.enabled {
             *self.retransmit_handshake.lock() = None;
             self.handshake_attempts.store(0, Ordering::SeqCst);
-            self.sent_lastminute_handshake.store(false, Ordering::SeqCst);
+            self.sent_lastminute_handshake
+                .store(false, Ordering::SeqCst);
         }
     }
 
@@ -191,7 +192,8 @@ impl Timers {
         *self.zero_key_material.lock() = None;
         *self.new_handshake.lock() = None;
         self.handshake_attempts.store(0, Ordering::SeqCst);
-        self.sent_lastminute_handshake.store(false, Ordering::SeqCst);
+        self.sent_lastminute_handshake
+            .store(false, Ordering::SeqCst);
         self.need_another_keepalive.store(false, Ordering::SeqCst);
     }
 
@@ -262,9 +264,8 @@ impl Timers {
                     if self.keepalive_interval > 0 {
                         *self.send_keepalive.lock() = None;
                         actions.send_persistent_keepalive = true;
-                        *timer = Some(
-                            Instant::now() + Duration::from_secs(self.keepalive_interval),
-                        );
+                        *timer =
+                            Some(Instant::now() + Duration::from_secs(self.keepalive_interval));
                     } else {
                         *timer = None;
                     }

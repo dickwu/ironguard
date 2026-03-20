@@ -11,8 +11,8 @@ use crate::types::{Config, InterfaceConfig, PeerConfig, PostQuantumMode};
 /// The private key is extracted and saved to `<conf_dir>/<interface>.key`,
 /// referenced via `private_key_file` in the resulting config.
 pub fn import_conf(path: &str) -> Result<Config> {
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("failed to read conf file: {path}"))?;
+    let content =
+        fs::read_to_string(path).with_context(|| format!("failed to read conf file: {path}"))?;
 
     let conf_path = Path::new(path);
     let interface_name = conf_path
@@ -21,9 +21,7 @@ pub fn import_conf(path: &str) -> Result<Config> {
         .unwrap_or("wg0")
         .to_string();
 
-    let conf_dir = conf_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."));
+    let conf_dir = conf_path.parent().unwrap_or_else(|| Path::new("."));
 
     let (iface_cfg, key_data) = parse_conf_content(&content, &interface_name, conf_dir)?;
 
@@ -157,10 +155,9 @@ fn parse_conf_content(
                                 .unwrap_or("psk.key")
                                 .to_string();
                             fs::create_dir_all(conf_dir).ok();
-                            fs::write(&psk_path, hex::encode(key_bytes))
-                                .with_context(|| {
-                                    format!("failed to write preshared key file: {psk_path}")
-                                })?;
+                            fs::write(&psk_path, hex::encode(key_bytes)).with_context(|| {
+                                format!("failed to write preshared key file: {psk_path}")
+                            })?;
                             peer.preshared_key_file = Some(psk_path);
                         }
                         "allowedips" => {
@@ -175,13 +172,10 @@ fn parse_conf_content(
                             peer.endpoint = Some(value.to_string());
                         }
                         "persistentkeepalive" => {
-                            peer.persistent_keepalive = Some(
-                                value
-                                    .parse::<u64>()
-                                    .with_context(|| {
-                                        format!("invalid persistent keepalive: {value}")
-                                    })?,
-                            );
+                            peer.persistent_keepalive =
+                                Some(value.parse::<u64>().with_context(|| {
+                                    format!("invalid persistent keepalive: {value}")
+                                })?);
                         }
                         _ => {}
                     }
@@ -285,10 +279,7 @@ pub fn export_conf(config: &Config, interface: &str) -> Result<String> {
             if let Ok(content) = fs::read_to_string(psk_path) {
                 if let Ok(psk_bytes) = hex::decode(content.trim()) {
                     if psk_bytes.len() == 32 {
-                        out.push_str(&format!(
-                            "PresharedKey = {}\n",
-                            base64_encode(&psk_bytes)
-                        ));
+                        out.push_str(&format!("PresharedKey = {}\n", base64_encode(&psk_bytes)));
                     }
                 }
             }

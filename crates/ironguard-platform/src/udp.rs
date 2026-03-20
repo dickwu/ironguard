@@ -10,7 +10,11 @@ pub trait UdpReader<E: Endpoint>: Send + Sync {
 
 pub trait UdpWriter<E: Endpoint>: Send + Sync + 'static {
     type Error: Error;
-    fn write(&self, buf: &[u8], dst: &mut E) -> impl Future<Output = Result<(), Self::Error>> + Send;
+    fn write(
+        &self,
+        buf: &[u8],
+        dst: &mut E,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 }
 
 pub trait Udp: Send + Sync + 'static {

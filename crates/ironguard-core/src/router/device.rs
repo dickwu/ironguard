@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::ops::Deref;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::thread;
 
 use spin::{Mutex, RwLock};
@@ -15,13 +15,13 @@ use ironguard_platform::udp;
 
 use super::anti_replay::AntiReplay;
 use super::constants::PARALLEL_QUEUE_SIZE;
-use super::messages::{TransportHeader, TYPE_TRANSPORT};
-use super::peer::{new_peer, Peer, PeerHandle};
+use super::messages::{TYPE_TRANSPORT, TransportHeader};
+use super::peer::{Peer, PeerHandle, new_peer};
 use super::queue::ParallelQueue;
 use super::receive::ReceiveJob;
 use super::route::RoutingTable;
 use super::types::{Callbacks, RouterError};
-use super::worker::{worker, JobUnion};
+use super::worker::{JobUnion, worker};
 
 /// Block on an async IO future from either an async task or a plain OS thread.
 /// Uses `block_in_place` when called from within a Tokio runtime context
@@ -69,9 +69,7 @@ pub struct Device<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E
     inner: Arc<DeviceInner<E, C, T, B>>,
 }
 
-impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> Clone
-    for Device<E, C, T, B>
-{
+impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> Clone for Device<E, C, T, B> {
     fn clone(&self) -> Self {
         Device {
             inner: self.inner.clone(),
@@ -87,14 +85,9 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> PartialEq
     }
 }
 
-impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> Eq
-    for Device<E, C, T, B>
-{
-}
+impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> Eq for Device<E, C, T, B> {}
 
-impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> Deref
-    for Device<E, C, T, B>
-{
+impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> Deref for Device<E, C, T, B> {
     type Target = DeviceInner<E, C, T, B>;
     fn deref(&self) -> &Self::Target {
         &self.inner
@@ -161,13 +154,11 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> DeviceHand
         if bind.0 {
             if let Some(bind) = bind.1.as_ref() {
                 let fut = bind.write(msg, dst);
-                return block_on_io(&self.state.rt_handle, fut)
-                    .map_err(|_| RouterError::SendError);
+                return block_on_io(&self.state.rt_handle, fut).map_err(|_| RouterError::SendError);
             }
         }
         Ok(())
     }
-
 
     /// Brings the router down (prevents outbound transmission).
     pub fn down(&self) {
@@ -210,9 +201,7 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> DeviceHand
             return Err(RouterError::MalformedTransportMessage);
         }
 
-        let header = unsafe {
-            &*(msg.as_ptr() as *const TransportHeader)
-        };
+        let header = unsafe { &*(msg.as_ptr() as *const TransportHeader) };
 
         debug_assert!(
             header.message_type() == TYPE_TRANSPORT,

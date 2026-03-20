@@ -4,3 +4,10 @@ Cargo.lock
 *.swp
 *.swo
 .DS_Store
+
+
+.swarm
+.claude*
+.mcp*
+claude.md
+

@@ -1,5 +1,5 @@
-use tokio::sync::mpsc;
 use crate::tun;
+use tokio::sync::mpsc;
 
 #[derive(Debug, thiserror::Error)]
 #[error("dummy tun error: {0}")]
@@ -12,7 +12,9 @@ pub struct DummyTunWriter {
 impl tun::Writer for DummyTunWriter {
     type Error = DummyTunError;
     async fn write(&self, src: &[u8]) -> Result<(), Self::Error> {
-        self.tx.send(src.to_vec()).await
+        self.tx
+            .send(src.to_vec())
+            .await
             .map_err(|e| DummyTunError(e.to_string()))
     }
 }
@@ -24,7 +26,12 @@ pub struct DummyTunReader {
 impl tun::Reader for DummyTunReader {
     type Error = DummyTunError;
     async fn read(&self, buf: &mut [u8], offset: usize) -> Result<usize, Self::Error> {
-        let packet = self.rx.lock().await.recv().await
+        let packet = self
+            .rx
+            .lock()
+            .await
+            .recv()
+            .await
             .ok_or_else(|| DummyTunError("channel closed".to_string()))?;
         let len = packet.len();
         buf[offset..offset + len].copy_from_slice(&packet);
@@ -39,7 +46,11 @@ pub struct DummyTunStatus {
 impl tun::Status for DummyTunStatus {
     type Error = DummyTunError;
     async fn event(&mut self) -> Result<tun::TunEvent, Self::Error> {
-        self.rx.lock().await.recv().await
+        self.rx
+            .lock()
+            .await
+            .recv()
+            .await
             .ok_or_else(|| DummyTunError("channel closed".to_string()))
     }
 }
@@ -52,13 +63,22 @@ impl tun::Tun for DummyTun {
     type Error = DummyTunError;
 }
 
-pub fn create_pair() -> (Vec<DummyTunReader>, DummyTunWriter, Vec<DummyTunReader>, DummyTunWriter) {
+pub fn create_pair() -> (
+    Vec<DummyTunReader>,
+    DummyTunWriter,
+    Vec<DummyTunReader>,
+    DummyTunWriter,
+) {
     let (tx_a, rx_a) = mpsc::channel(256);
     let (tx_b, rx_b) = mpsc::channel(256);
     (
-        vec![DummyTunReader { rx: tokio::sync::Mutex::new(rx_b) }],
+        vec![DummyTunReader {
+            rx: tokio::sync::Mutex::new(rx_b),
+        }],
         DummyTunWriter { tx: tx_a },
-        vec![DummyTunReader { rx: tokio::sync::Mutex::new(rx_a) }],
+        vec![DummyTunReader {
+            rx: tokio::sync::Mutex::new(rx_a),
+        }],
         DummyTunWriter { tx: tx_b },
     )
 }

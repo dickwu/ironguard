@@ -81,10 +81,13 @@ impl RateLimiter {
                 }
             } else {
                 // New entry: allow the first packet, start with burst-1 tokens remaining.
-                table.insert(*addr, Entry {
-                    last_time: Instant::now(),
-                    tokens: MAX_TOKENS - PACKET_COST,
-                });
+                table.insert(
+                    *addr,
+                    Entry {
+                        last_time: Instant::now(),
+                        tokens: MAX_TOKENS - PACKET_COST,
+                    },
+                );
                 true
             }
         };

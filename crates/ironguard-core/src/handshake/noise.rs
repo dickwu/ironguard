@@ -98,7 +98,9 @@ mod tests {
 
         // Responder decrypts it
         let mut decrypted = vec![0u8; elen];
-        let dlen = r_transport.read_message(&encrypted[..elen], &mut decrypted).unwrap();
+        let dlen = r_transport
+            .read_message(&encrypted[..elen], &mut decrypted)
+            .unwrap();
         assert_eq!(&decrypted[..dlen], msg);
     }
 
@@ -128,7 +130,9 @@ mod tests {
         let elen = r_transport.write_message(msg, &mut encrypted).unwrap();
 
         let mut decrypted = vec![0u8; elen];
-        let dlen = i_transport.read_message(&encrypted[..elen], &mut decrypted).unwrap();
+        let dlen = i_transport
+            .read_message(&encrypted[..elen], &mut decrypted)
+            .unwrap();
         assert_eq!(&decrypted[..dlen], msg);
     }
 

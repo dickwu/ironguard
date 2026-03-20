@@ -163,8 +163,13 @@ impl rustls::client::danger::ServerCertVerifier for InsecureVerifier {
 ///
 /// The certificate is throw-away: real peer authentication happens through
 /// WireGuard's Noise handshake.
-pub fn generate_self_signed_cert(
-) -> Result<(Vec<rustls::pki_types::CertificateDer<'static>>, rustls::pki_types::PrivateKeyDer<'static>), QuicError> {
+pub fn generate_self_signed_cert() -> Result<
+    (
+        Vec<rustls::pki_types::CertificateDer<'static>>,
+        rustls::pki_types::PrivateKeyDer<'static>,
+    ),
+    QuicError,
+> {
     let cert_params = rcgen::CertificateParams::new(vec!["ironguard".to_string()])?;
     let key_pair = rcgen::KeyPair::generate()?;
     let cert = cert_params.self_signed(&key_pair)?;
@@ -242,10 +247,9 @@ impl QuicTransport {
         tracing::info!(port = actual_port, "QUIC server listening");
 
         // Accept the first incoming connection.
-        let incoming = endpoint
-            .accept()
-            .await
-            .ok_or_else(|| QuicError::Io(std::io::Error::other("endpoint closed before accepting")))?;
+        let incoming = endpoint.accept().await.ok_or_else(|| {
+            QuicError::Io(std::io::Error::other("endpoint closed before accepting"))
+        })?;
         let connection = incoming.await?;
 
         tracing::info!(
@@ -276,10 +280,7 @@ impl QuicTransport {
     /// Attempt to re-establish the QUIC connection if it has been lost.
     pub async fn reconnect(&self) -> Result<(), QuicError> {
         let sni = self.config.sni.as_deref().unwrap_or("ironguard");
-        let new_conn = self
-            .endpoint
-            .connect(self.config.relay_addr, sni)?
-            .await?;
+        let new_conn = self.endpoint.connect(self.config.relay_addr, sni)?.await?;
         let mut guard = self.connection.write().await;
         *guard = Some(new_conn);
         tracing::info!("QUIC reconnected");
@@ -344,10 +345,7 @@ impl udp::UdpReader<QuicEndpoint> for QuicReader {
 
 impl QuicReader {
     /// Read a single length-prefixed WireGuard packet from a QUIC stream.
-    async fn read_from_stream(
-        &self,
-        buf: &mut [u8],
-    ) -> Result<(usize, QuicEndpoint), QuicError> {
+    async fn read_from_stream(&self, buf: &mut [u8]) -> Result<(usize, QuicEndpoint), QuicError> {
         let guard = self.transport.connection.read().await;
         let conn = guard.as_ref().ok_or(QuicError::NotConnected)?;
 

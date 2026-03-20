@@ -19,7 +19,11 @@ pub trait Writer: Send + Sync + 'static {
 
 pub trait Reader: Send + 'static {
     type Error: Error;
-    fn read(&self, buf: &mut [u8], offset: usize) -> impl Future<Output = Result<usize, Self::Error>> + Send;
+    fn read(
+        &self,
+        buf: &mut [u8],
+        offset: usize,
+    ) -> impl Future<Output = Result<usize, Self::Error>> + Send;
 }
 
 pub trait Tun: Send + Sync + 'static {

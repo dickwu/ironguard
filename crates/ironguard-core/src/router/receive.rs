@@ -10,10 +10,10 @@ use ironguard_platform::endpoint::Endpoint;
 use ironguard_platform::tun;
 use ironguard_platform::udp;
 
-use std::sync::Arc;
 use core::sync::atomic::{AtomicBool, Ordering};
-use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, CHACHA20_POLY1305};
+use ring::aead::{Aad, CHACHA20_POLY1305, LessSafeKey, Nonce, UnboundKey};
 use spin::Mutex;
+use std::sync::Arc;
 
 const SIZE_TAG: usize = 16;
 
@@ -72,9 +72,7 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> ParallelJo
                 }
 
                 // parse header
-                let header = unsafe {
-                    &*(msg.1.as_ptr() as *const TransportHeader)
-                };
+                let header = unsafe { &*(msg.1.as_ptr() as *const TransportHeader) };
 
                 let counter = header.counter();
 
@@ -122,7 +120,10 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> Sequential
     }
 
     fn sequential_work(self) {
-        debug_assert!(self.is_ready(), "doing sequential work on an incomplete job");
+        debug_assert!(
+            self.is_ready(),
+            "doing sequential work on an incomplete job"
+        );
 
         let job = &self.0;
         let peer = &job.state.peer;
@@ -136,9 +137,7 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> Sequential
             return;
         }
 
-        let header = unsafe {
-            &*(msg.1.as_ptr() as *const TransportHeader)
-        };
+        let header = unsafe { &*(msg.1.as_ptr() as *const TransportHeader) };
 
         // check for replay
         if !job.state.protector.lock().update(header.counter()) {

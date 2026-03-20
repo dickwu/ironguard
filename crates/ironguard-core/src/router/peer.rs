@@ -8,8 +8,8 @@ use super::anti_replay::AntiReplay;
 use super::constants::MAX_QUEUED_PACKETS;
 use super::device::{DecryptionState, Device, EncryptionState};
 use super::queue::Queue;
-use super::send::SendJob;
 use super::receive::ReceiveJob;
+use super::send::SendJob;
 use super::types::{Callbacks, RouterError};
 use super::worker::JobUnion;
 
@@ -58,9 +58,7 @@ pub struct Peer<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>>
     inner: Arc<PeerInner<E, C, T, B>>,
 }
 
-impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> Clone
-    for Peer<E, C, T, B>
-{
+impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> Clone for Peer<E, C, T, B> {
     fn clone(&self) -> Self {
         Peer {
             inner: self.inner.clone(),
@@ -76,14 +74,9 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> PartialEq
     }
 }
 
-impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> Eq
-    for Peer<E, C, T, B>
-{
-}
+impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> Eq for Peer<E, C, T, B> {}
 
-impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> Deref
-    for Peer<E, C, T, B>
-{
+impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> Deref for Peer<E, C, T, B> {
     type Target = PeerInner<E, C, T, B>;
     fn deref(&self) -> &Self::Target {
         &self.inner
@@ -134,9 +127,7 @@ impl EncryptionState {
     }
 }
 
-impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>>
-    DecryptionState<E, C, T, B>
-{
+impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> DecryptionState<E, C, T, B> {
     fn new(peer: Peer<E, C, T, B>, keypair: &Arc<KeyPair>) -> DecryptionState<E, C, T, B> {
         DecryptionState {
             confirmed: AtomicBool::new(keypair.initiator),
@@ -240,7 +231,8 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> PeerInner<
                             super::device::block_on_io(
                                 &self.device.rt_handle,
                                 w.write(msg, endpoint),
-                            ).map_err(|_| RouterError::SendError)
+                            )
+                            .map_err(|_| RouterError::SendError)
                         })
                 } else {
                     Ok(())

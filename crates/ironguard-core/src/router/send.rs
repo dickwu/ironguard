@@ -1,7 +1,7 @@
 use crate::constants::{REJECT_AFTER_MESSAGES, SIZE_MESSAGE_PREFIX};
 use crate::types::KeyPair;
 
-use super::messages::{TransportHeader, TYPE_TRANSPORT};
+use super::messages::{TYPE_TRANSPORT, TransportHeader};
 use super::peer::Peer;
 use super::queue::{ParallelJob, Queue, SequentialJob};
 use super::types::Callbacks;
@@ -10,10 +10,10 @@ use ironguard_platform::endpoint::Endpoint;
 use ironguard_platform::tun;
 use ironguard_platform::udp;
 
-use std::sync::Arc;
 use core::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
-use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, CHACHA20_POLY1305};
+use ring::aead::{Aad, CHACHA20_POLY1305, LessSafeKey, Nonce, UnboundKey};
 use spin::Mutex;
 
 const SIZE_TAG: usize = 16;
@@ -83,9 +83,8 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> ParallelJo
             );
 
             // Write transport header at HEADER_OFFSET (just before the IP packet)
-            let header = unsafe {
-                &mut *(msg.as_mut_ptr().add(HEADER_OFFSET) as *mut TransportHeader)
-            };
+            let header =
+                unsafe { &mut *(msg.as_mut_ptr().add(HEADER_OFFSET) as *mut TransportHeader) };
             header.set_type(TYPE_TRANSPORT);
             header.set_receiver(job.keypair.send.id);
             header.set_counter(job.counter);
@@ -123,7 +122,10 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> Sequential
     }
 
     fn sequential_work(self) {
-        debug_assert!(self.is_ready(), "doing sequential work on an incomplete job");
+        debug_assert!(
+            self.is_ready(),
+            "doing sequential work on an incomplete job"
+        );
 
         let job = &self.0;
         let msg = job.buffer.lock();
@@ -133,6 +135,12 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> Sequential
         let xmit = job.peer.send_raw(wire_msg).is_ok();
 
         // Report the wire message size
-        C::send(&job.peer.opaque, wire_msg.len(), xmit, &job.keypair, job.counter);
+        C::send(
+            &job.peer.opaque,
+            wire_msg.len(),
+            xmit,
+            &job.keypair,
+            job.counter,
+        );
     }
 }

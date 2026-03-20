@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::ops::Deref;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use parking_lot::Mutex;
@@ -16,7 +16,7 @@ use crate::queue::ParallelQueue;
 use crate::router;
 use crate::timers::TIMERS_TICK;
 use crate::types::{PublicKey, StaticSecret};
-use crate::workers::{handshake_worker, tun_worker, udp_worker, HandshakeJob};
+use crate::workers::{HandshakeJob, handshake_worker, tun_worker, udp_worker};
 
 use ironguard_platform::tun;
 use ironguard_platform::udp;
@@ -57,10 +57,7 @@ pub struct WireGuardInner<T: tun::Tun, B: udp::Udp> {
     // peer handles for looking up by public key (needed by handshake workers)
     #[allow(clippy::type_complexity)]
     pub peer_handles: RwLock<
-        HashMap<
-            [u8; 32],
-            router::PeerHandle<B::Endpoint, PeerInner<T, B>, T::Writer, B::Writer>,
-        >,
+        HashMap<[u8; 32], router::PeerHandle<B::Endpoint, PeerInner<T, B>, T::Writer, B::Writer>>,
     >,
 
     // Tokio runtime — owned by the device, used for spawning async tasks
@@ -184,12 +181,7 @@ impl<T: tun::Tun, B: udp::Udp> WireGuard<T, B> {
     pub fn add_peer(&self, pk: PublicKey) -> bool {
         let enabled = *self.enabled.read();
 
-        let peer_inner = PeerInner::new(
-            rand::random(),
-            pk.clone(),
-            self.clone(),
-            enabled,
-        );
+        let peer_inner = PeerInner::new(rand::random(), pk.clone(), self.clone(), enabled);
 
         let peer_handle = self.router.new_peer(peer_inner);
 
@@ -198,7 +190,9 @@ impl<T: tun::Tun, B: udp::Udp> WireGuard<T, B> {
         peers.add(pk.clone(), peer_handle.clone());
 
         // Store the handle
-        self.peer_handles.write().insert(*pk.as_bytes(), peer_handle);
+        self.peer_handles
+            .write()
+            .insert(*pk.as_bytes(), peer_handle);
         true
     }
 
@@ -218,9 +212,7 @@ impl<T: tun::Tun, B: udp::Udp> WireGuard<T, B> {
     pub fn get_peer_handle(
         &self,
         pk: &PublicKey,
-    ) -> Option<
-        router::PeerHandle<B::Endpoint, PeerInner<T, B>, T::Writer, B::Writer>,
-    > {
+    ) -> Option<router::PeerHandle<B::Endpoint, PeerInner<T, B>, T::Writer, B::Writer>> {
         self.peer_handles.read().get(pk.as_bytes()).cloned()
     }
 
@@ -266,10 +258,7 @@ impl<T: tun::Tun, B: udp::Udp> WireGuard<T, B> {
     /// Spawn a Tokio task that ticks all peer timers every `TIMERS_TICK`.
     /// The task exits when `stop` is set to true.
     /// Returns a `JoinHandle` for the spawned task.
-    pub fn start_timer_task(
-        &self,
-        stop: Arc<AtomicBool>,
-    ) -> tokio::task::JoinHandle<()> {
+    pub fn start_timer_task(&self, stop: Arc<AtomicBool>) -> tokio::task::JoinHandle<()> {
         let wg = self.clone();
         self.runtime.spawn(async move {
             let mut interval = tokio::time::interval(TIMERS_TICK);
@@ -325,8 +314,8 @@ mod tests {
     use ironguard_platform::dummy::udp as dummy_udp;
     use ironguard_platform::dummy::udp::DummyUdp;
     use ironguard_platform::endpoint::Endpoint as _;
-    use std::thread;
     use std::net::IpAddr;
+    use std::thread;
     use std::time::Duration;
 
     type TestWireGuard = WireGuard<DummyTun, DummyUdp>;
@@ -370,8 +359,7 @@ mod tests {
     #[test]
     fn test_full_wireguard_tunnel() {
         // ── Step 1: Create dummy TUN and UDP pairs ───────────────────────
-        let (a_tun_readers, a_tun_writer, b_tun_readers, b_tun_writer) =
-            dummy_tun::create_pair();
+        let (a_tun_readers, a_tun_writer, b_tun_readers, b_tun_writer) = dummy_tun::create_pair();
         let (a_udp_readers, a_udp_writer, _a_owner, b_udp_readers, b_udp_writer, _b_owner) =
             dummy_udp::create_pair();
 
@@ -453,7 +441,11 @@ mod tests {
             // Send init message via A's UDP writer to B's UDP reader
             let handle_a = wg_a.get_peer_handle(&pk_b).unwrap();
             let send_result = handle_a.send_raw(&init_msg[..]);
-            assert!(send_result.is_ok(), "send_raw should succeed: {:?}", send_result.err());
+            assert!(
+                send_result.is_ok(),
+                "send_raw should succeed: {:?}",
+                send_result.err()
+            );
         }
 
         // Wait for the handshake to complete by polling B's rx_bytes.
@@ -477,7 +469,11 @@ mod tests {
         }
 
         let b_rx = handle_b.opaque().rx_bytes.load(Ordering::Relaxed);
-        assert!(b_rx > 0, "B should have received bytes from A (rx_bytes={})", b_rx);
+        assert!(
+            b_rx > 0,
+            "B should have received bytes from A (rx_bytes={})",
+            b_rx
+        );
 
         // Verify last handshake timestamp was set on B
         let walltime = handle_b.opaque().walltime_last_handshake.lock();
@@ -491,7 +487,11 @@ mod tests {
         msg[SIZE_MESSAGE_PREFIX..].copy_from_slice(&test_packet);
 
         let send_result = wg_a.router.send(msg);
-        assert!(send_result.is_ok(), "A should route the packet to B: {:?}", send_result.err());
+        assert!(
+            send_result.is_ok(),
+            "A should route the packet to B: {:?}",
+            send_result.err()
+        );
 
         // Wait for the data packet to be processed
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -514,7 +514,11 @@ mod tests {
 
         // Verify A has tx stats (from keepalive after handshake + data packet)
         let a_tx = handle_a.opaque().tx_bytes.load(Ordering::Relaxed);
-        assert!(a_tx > 0, "A should have transmitted bytes (tx_bytes={})", a_tx);
+        assert!(
+            a_tx > 0,
+            "A should have transmitted bytes (tx_bytes={})",
+            a_tx
+        );
 
         // ── Cleanup ─────────────────────────────────────────────────────
         stop_a.store(true, Ordering::Relaxed);

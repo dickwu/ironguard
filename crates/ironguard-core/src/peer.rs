@@ -1,6 +1,6 @@
 use std::fmt;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Instant, SystemTime};
 
 use parking_lot::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -51,12 +51,7 @@ pub struct PeerInner<T: tun::Tun, B: udp::Udp> {
 }
 
 impl<T: tun::Tun, B: udp::Udp> PeerInner<T, B> {
-    pub fn new(
-        id: u64,
-        pk: PublicKey,
-        wg: crate::device::WireGuard<T, B>,
-        enabled: bool,
-    ) -> Self {
+    pub fn new(id: u64, pk: PublicKey, wg: crate::device::WireGuard<T, B>, enabled: bool) -> Self {
         Self {
             id,
             wg,

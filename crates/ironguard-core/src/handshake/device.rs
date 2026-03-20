@@ -16,15 +16,14 @@ use dashmap::DashMap;
 use parking_lot::{Mutex, RwLock};
 use rand::Rng;
 
-use crate::{Key, KeyPair, PublicKey, StaticSecret};
 use crate::handshake::macs::{self, HandshakeError};
 use crate::handshake::messages::{
-    CookieReply, MacsFooter,
-    TYPE_COOKIE_REPLY, TYPE_INITIATION, TYPE_RESPONSE,
+    CookieReply, MacsFooter, TYPE_COOKIE_REPLY, TYPE_INITIATION, TYPE_RESPONSE,
 };
 use crate::handshake::noise;
 use crate::handshake::peer::{Peer, PeerState};
 use crate::handshake::ratelimiter::RateLimiter;
+use crate::{Key, KeyPair, PublicKey, StaticSecret};
 
 /// Output of `Device::process()`:
 ///   (peer_opaque, bytes_to_send, keypair_if_complete)
@@ -43,12 +42,7 @@ const MAX_PEERS: usize = 1 << 20;
 /// The caller guarantees that `T` has no padding bytes that would be
 /// uninitialised, and that the value is fully initialised.
 unsafe fn as_bytes<T: Sized>(val: &T) -> &[u8] {
-    unsafe {
-        std::slice::from_raw_parts(
-            val as *const T as *const u8,
-            std::mem::size_of::<T>(),
-        )
-    }
+    unsafe { std::slice::from_raw_parts(val as *const T as *const u8, std::mem::size_of::<T>()) }
 }
 
 /// Try to interpret a byte slice as a `#[repr(C, packed)]` struct.
@@ -208,7 +202,8 @@ impl<O: Clone> Device<O> {
         if map.len() >= MAX_PEERS {
             return;
         }
-        map.entry(*pk.as_bytes()).or_insert_with(|| Peer::new(pk, opaque));
+        map.entry(*pk.as_bytes())
+            .or_insert_with(|| Peer::new(pk, opaque));
     }
 
     pub fn remove(&self, pk: &PublicKey) {
@@ -223,7 +218,10 @@ impl<O: Clone> Device<O> {
     pub fn get(&self, pk: &PublicKey) -> Option<impl std::ops::Deref<Target = O> + '_> {
         let guard = self.pk_map.read();
         if guard.contains_key(pk.as_bytes()) {
-            Some(PkMapRef { guard, key: *pk.as_bytes() })
+            Some(PkMapRef {
+                guard,
+                key: *pk.as_bytes(),
+            })
         } else {
             None
         }
@@ -248,7 +246,9 @@ impl<O: Clone> Device<O> {
         let sk = sk_guard.as_ref().ok_or(HandshakeError::UnknownPublicKey)?;
 
         let pk_map = self.pk_map.read();
-        let peer = pk_map.get(pk.as_bytes()).ok_or(HandshakeError::UnknownPublicKey)?;
+        let peer = pk_map
+            .get(pk.as_bytes())
+            .ok_or(HandshakeError::UnknownPublicKey)?;
 
         // Build snow initiator
         let mut hs = noise::build_initiator(sk.as_bytes(), pk.as_bytes(), &peer.psk)?;
@@ -275,7 +275,10 @@ impl<O: Clone> Device<O> {
         msg.extend_from_slice(unsafe { as_bytes(&macs_footer) });
 
         // Store the snow HandshakeState in the peer
-        *peer.state.lock() = PeerState::InitiationSent { hs: Box::new(hs), local_id };
+        *peer.state.lock() = PeerState::InitiationSent {
+            hs: Box::new(hs),
+            local_id,
+        };
 
         Ok(msg)
     }
@@ -377,8 +380,7 @@ impl<O: Clone> Device<O> {
         let resp_noise = &resp_noise_buf[..resp_n];
 
         // Derive transport keypair (consumes HandshakeState)
-        let (keypair, _transport) =
-            extract_keypair_from_hs(hs, local_id, sender_id, false)?;
+        let (keypair, _transport) = extract_keypair_from_hs(hs, local_id, sender_id, false)?;
 
         // Look up the peer — it must be pre-registered — and clone the opaque
         let opaque = {
@@ -464,7 +466,9 @@ impl<O: Clone> Device<O> {
         // Extract the HandshakeState and clone the opaque value
         let (hs, opaque) = {
             let pk_map = self.pk_map.read();
-            let peer = pk_map.get(&peer_pk_bytes).ok_or(HandshakeError::UnknownPublicKey)?;
+            let peer = pk_map
+                .get(&peer_pk_bytes)
+                .ok_or(HandshakeError::UnknownPublicKey)?;
 
             let hs = {
                 let mut state = peer.state.lock();
@@ -495,10 +499,7 @@ impl<O: Clone> Device<O> {
 
     // ── internal: cookie reply ─────────────────────────────────────────────────
 
-    fn process_cookie_reply(
-        &self,
-        msg: &[u8],
-    ) -> Result<Output<O>, HandshakeError> {
+    fn process_cookie_reply(&self, msg: &[u8]) -> Result<Output<O>, HandshakeError> {
         if msg.len() < std::mem::size_of::<CookieReply>() {
             return Err(HandshakeError::InvalidMessageFormat);
         }
@@ -515,7 +516,9 @@ impl<O: Clone> Device<O> {
         };
 
         let pk_map = self.pk_map.read();
-        let peer = pk_map.get(&peer_pk_bytes).ok_or(HandshakeError::UnknownPublicKey)?;
+        let peer = pk_map
+            .get(&peer_pk_bytes)
+            .ok_or(HandshakeError::UnknownPublicKey)?;
 
         peer.macs.lock().process(&reply)?;
 
@@ -648,7 +651,8 @@ mod tests {
         let sender_id = u32::from_le_bytes(init[4..8].try_into().unwrap());
         let macs_offset = init.len() - 32;
         let mut macs = MacsFooter::default();
-        macs.f_mac1.copy_from_slice(&init[macs_offset..macs_offset + 16]);
+        macs.f_mac1
+            .copy_from_slice(&init[macs_offset..macs_offset + 16]);
         macs.f_mac2.copy_from_slice(&init[macs_offset + 16..]);
 
         let src: SocketAddr = "127.0.0.1:12345".parse().unwrap();

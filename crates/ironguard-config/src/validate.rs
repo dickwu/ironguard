@@ -74,9 +74,7 @@ pub fn validate(config: &Config) -> Result<Vec<String>> {
             // Check allowed_ips are valid CIDR
             for ip in &peer.allowed_ips {
                 if !is_valid_cidr(ip) {
-                    warnings.push(format!(
-                        "{peer_label}: invalid CIDR notation: {ip}"
-                    ));
+                    warnings.push(format!("{peer_label}: invalid CIDR notation: {ip}"));
                 }
             }
         }
@@ -168,12 +166,7 @@ mod tests {
 
     #[test]
     fn test_validate_no_key_source() {
-        let config = make_config(
-            None,
-            &hex::encode([0xABu8; 32]),
-            vec!["10.0.0.0/24"],
-            None,
-        );
+        let config = make_config(None, &hex::encode([0xABu8; 32]), vec!["10.0.0.0/24"], None);
 
         let warnings = validate(&config).unwrap();
         assert!(
@@ -195,12 +188,7 @@ mod tests {
 
     #[test]
     fn test_validate_bad_cidr() {
-        let config = make_config(
-            None,
-            &hex::encode([0xABu8; 32]),
-            vec!["not-a-cidr"],
-            None,
-        );
+        let config = make_config(None, &hex::encode([0xABu8; 32]), vec!["not-a-cidr"], None);
 
         let warnings = validate(&config).unwrap();
         assert!(

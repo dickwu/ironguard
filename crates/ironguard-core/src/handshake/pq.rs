@@ -50,8 +50,9 @@ impl PqKeyPair {
     ///
     /// The encapsulation key is derived from the decapsulation key.
     pub fn from_dk_bytes(bytes: &[u8]) -> Result<Self, PqError> {
-        let encoded: &Encoded<DecapsulationKey<MlKem768Params>> =
-            bytes.try_into().map_err(|_| PqError::InvalidDecapsulationKey)?;
+        let encoded: &Encoded<DecapsulationKey<MlKem768Params>> = bytes
+            .try_into()
+            .map_err(|_| PqError::InvalidDecapsulationKey)?;
         let dk = DecapsulationKey::<MlKem768Params>::from_bytes(encoded);
         let ek = dk.encapsulation_key().clone();
         Ok(Self {
@@ -62,11 +63,10 @@ impl PqKeyPair {
 }
 
 /// Parse an encapsulation key from raw bytes.
-pub fn parse_encapsulation_key(
-    bytes: &[u8],
-) -> Result<EncapsulationKey<MlKem768Params>, PqError> {
-    let encoded: &Encoded<EncapsulationKey<MlKem768Params>> =
-        bytes.try_into().map_err(|_| PqError::InvalidEncapsulationKey)?;
+pub fn parse_encapsulation_key(bytes: &[u8]) -> Result<EncapsulationKey<MlKem768Params>, PqError> {
+    let encoded: &Encoded<EncapsulationKey<MlKem768Params>> = bytes
+        .try_into()
+        .map_err(|_| PqError::InvalidEncapsulationKey)?;
     Ok(EncapsulationKey::<MlKem768Params>::from_bytes(encoded))
 }
 
@@ -75,9 +75,7 @@ pub fn parse_encapsulation_key(
 /// The ciphertext should be sent to the peer who holds the corresponding
 /// decapsulation key. The PSK (32 bytes) is fed into the WireGuard
 /// Noise_IKpsk2 handshake's PSK slot.
-pub fn encapsulate(
-    peer_ek: &EncapsulationKey<MlKem768Params>,
-) -> (Vec<u8>, Zeroizing<[u8; 32]>) {
+pub fn encapsulate(peer_ek: &EncapsulationKey<MlKem768Params>) -> (Vec<u8>, Zeroizing<[u8; 32]>) {
     let (ct, ss) = peer_ek
         .encapsulate(&mut OsRng)
         .expect("ML-KEM encapsulation is infallible");
