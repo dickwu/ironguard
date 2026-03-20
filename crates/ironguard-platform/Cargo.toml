@@ -1,0 +1,30 @@
+[package]
+name = "ironguard-platform"
+description = "Platform abstractions for IronGuard (TUN, UDP, Endpoint)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+quic = ["dep:quinn", "dep:rustls", "dep:rcgen", "dep:bytes"]
+
+[dependencies]
+thiserror = { workspace = true }
+tracing = { workspace = true }
+parking_lot = { workspace = true }
+crossbeam-channel = { workspace = true }
+tokio = { workspace = true }
+quinn = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+rcgen = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+tun-rs = { workspace = true }
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }

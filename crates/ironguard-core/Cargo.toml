@@ -1,0 +1,41 @@
+[package]
+name = "ironguard-core"
+description = "Pure WireGuard protocol implementation"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ring = { workspace = true }
+snow = { workspace = true }
+blake2b_simd = { workspace = true }
+blake2s_simd = { workspace = true }
+chacha20poly1305 = { workspace = true }
+zeroize = { workspace = true }
+subtle = { workspace = true }
+rand = { workspace = true }
+dashmap = { workspace = true }
+zerocopy = { workspace = true }
+arraydeque = { workspace = true }
+spin = { workspace = true }
+parking_lot = { workspace = true }
+crossbeam-channel = { workspace = true }
+ip_network_table-deps-treebitmap = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+hex = { workspace = true }
+num_cpus = { workspace = true }
+x25519-dalek = { workspace = true }
+tokio = { workspace = true }
+ironguard-platform = { path = "../ironguard-platform" }
+ml-kem = { workspace = true, optional = true }
+# ml-kem 0.2 uses rand_core 0.6; our rand 0.9 uses rand_core 0.9.
+# We need the 0.6 OsRng to satisfy ml-kem's CryptoRngCore bound.
+rand_core_06 = { package = "rand_core", version = "0.6", features = ["getrandom"], optional = true }
+
+[features]
+pq = ["dep:ml-kem", "dep:rand_core_06"]
+
+[dev-dependencies]
+proptest = { workspace = true }

@@ -1,0 +1,49 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ironguard-core",
+    "crates/ironguard-platform",
+    "crates/ironguard-config",
+    "crates/ironguard-cli",
+]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "GPL-3.0-or-later"
+rust-version = "1.85"
+
+[workspace.dependencies]
+ring = "0.17"
+snow = "0.10"
+blake2b_simd = "1"
+blake2s_simd = "1"
+chacha20poly1305 = "0.10"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+zeroize = { version = "1", features = ["derive"] }
+subtle = "2"
+rand = "0.9"
+dashmap = "6"
+zerocopy = { version = "0.8", features = ["derive"] }
+arraydeque = "0.5"
+spin = "0.9"
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
+ip_network_table-deps-treebitmap = "0.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+num_cpus = "1"
+hex = "0.4"
+ml-kem = "0.2"
+proptest = "1"
+tun-rs = "2.8"
+bytes = "1"
+quinn = "0.11"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rcgen = "0.13"

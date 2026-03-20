@@ -1,0 +1,29 @@
+[package]
+name = "ironguard-cli"
+description = "IronGuard WireGuard CLI"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+quic = ["ironguard-platform/quic"]
+pq = ["ironguard-core/pq"]
+
+[[bin]]
+name = "ironguard"
+path = "src/main.rs"
+
+[dependencies]
+ironguard-core = { path = "../ironguard-core" }
+ironguard-platform = { path = "../ironguard-platform" }
+ironguard-config = { path = "../ironguard-config" }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde_json = { workspace = true }
+rand = { workspace = true }
+hex = { workspace = true }
+x25519-dalek = { workspace = true }
+tokio = { workspace = true }

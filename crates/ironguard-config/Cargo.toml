@@ -1,0 +1,21 @@
+[package]
+name = "ironguard-config"
+description = "Configuration parsing for IronGuard (wg.json, .conf, UAPI)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+hex = { workspace = true }
+ironguard-core = { path = "../ironguard-core" }
+
+[dev-dependencies]
+tempfile = "3"
+ironguard-platform = { path = "../ironguard-platform" }
+x25519-dalek = { workspace = true }
+rand = { workspace = true }
