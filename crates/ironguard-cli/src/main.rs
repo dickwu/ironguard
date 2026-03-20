@@ -456,8 +456,7 @@ async fn cmd_up(interface: &str, config_path: &str, foreground: bool) -> Result<
     Ok(())
 }
 
-/// Resolve an endpoint string like "vpn.example.com:51820" or "1.2.3.4:51820"
-/// to a SocketAddr.
+#[cfg(target_os = "macos")]
 fn resolve_endpoint(endpoint: &str) -> Result<std::net::SocketAddr> {
     // Try direct parse first
     if let Ok(addr) = endpoint.parse::<std::net::SocketAddr>() {
@@ -477,7 +476,7 @@ fn resolve_endpoint(endpoint: &str) -> Result<std::net::SocketAddr> {
         .ok_or_else(|| anyhow!("endpoint {endpoint} resolved to no addresses"))
 }
 
-/// Parse a CIDR string like "10.0.0.0/24" or "fd00::1/128".
+#[cfg(target_os = "macos")]
 fn parse_cidr(cidr: &str) -> Result<(std::net::IpAddr, u32)> {
     let parts: Vec<&str> = cidr.split('/').collect();
     if parts.len() != 2 {
