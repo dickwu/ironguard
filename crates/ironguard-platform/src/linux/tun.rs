@@ -409,13 +409,27 @@ mod tests {
         let (readers, writer, _status) =
             LinuxTun::create_with_offload("wg3", 1).expect("TUN offload creation");
 
-        // Prepare a batch of packets to write
-        let pkt = vec![0u8; 64]; // minimal IP-like payload
+        // Prepare a batch of minimal valid IPv4 packets.
+        // TUN devices reject non-IP payloads with EINVAL, so we construct
+        // a minimal IPv4 header (20 bytes) + 4 bytes payload = 24 bytes.
+        fn make_ipv4_packet() -> Vec<u8> {
+            let mut pkt = vec![0u8; 24];
+            pkt[0] = 0x45; // version=4, ihl=5 (20 bytes)
+            pkt[2] = 0x00; // total length = 24
+            pkt[3] = 24;
+            pkt[8] = 64; // TTL
+            pkt[9] = 17; // protocol = UDP
+            // src = 10.200.0.1, dst = 10.200.0.2
+            pkt[12..16].copy_from_slice(&[10, 200, 0, 1]);
+            pkt[16..20].copy_from_slice(&[10, 200, 0, 2]);
+            pkt
+        }
+
         let mut gro_table = tun_rs::GROTable::default();
         let mut send_bufs: Vec<Vec<u8>> = (0..4)
             .map(|_| {
                 let mut buf = vec![0u8; VIRTIO_NET_HDR_LEN];
-                buf.extend_from_slice(&pkt);
+                buf.extend_from_slice(&make_ipv4_packet());
                 buf
             })
             .collect();
@@ -448,7 +462,7 @@ mod tests {
         // We cannot create a real device in a non-privileged test, so we
         // verify the logic by testing the degenerate empty-input path.
         // With no buffers, the loop body never executes and count stays 0.
-        let mut bufs: Vec<&mut [u8]> = vec![];
+        let bufs: Vec<&mut [u8]> = vec![];
         let offsets: Vec<usize> = vec![];
 
         // The function iterates zip(bufs, offsets) -- both empty, so count=0.
