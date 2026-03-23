@@ -187,6 +187,27 @@ impl tun::PlatformTun for MacosTun {
         let actual_name = device.name().unwrap_or_default();
         tracing::info!(interface = %actual_name, "created macOS utun device");
 
+        // Increase utun kernel buffer to prevent download stall.
+        // The default net.local.dgram.recvspace is only 8KB which can
+        // cause packet drops under load.  This requires root privileges;
+        // if it fails silently the tunnel still works, just with reduced buffer.
+        match std::process::Command::new("sysctl")
+            .args(["-w", "net.local.dgram.recvspace=262144"])
+            .output()
+        {
+            Ok(output) if output.status.success() => {
+                tracing::debug!("increased net.local.dgram.recvspace to 262144");
+            }
+            Ok(_) => {
+                tracing::debug!(
+                    "sysctl buffer tuning failed (requires root); using default buffer size"
+                );
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "sysctl command failed; using default buffer size");
+            }
+        }
+
         let raw_fd = device.as_raw_fd();
 
         let tun_device = TunDevice { device };
