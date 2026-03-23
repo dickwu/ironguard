@@ -33,9 +33,15 @@ ml-kem = { workspace = true, optional = true }
 # ml-kem 0.2 uses rand_core 0.6; our rand 0.9 uses rand_core 0.9.
 # We need the 0.6 OsRng to satisfy ml-kem's CryptoRngCore bound.
 rand_core_06 = { package = "rand_core", version = "0.6", features = ["getrandom"], optional = true }
+quinn = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+rcgen = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 
 [features]
 pq = ["dep:ml-kem", "dep:rand_core_06"]
+quic = ["dep:quinn", "dep:rustls", "dep:rcgen", "dep:serde", "dep:serde_json"]
 
 [dev-dependencies]
 proptest = { workspace = true }

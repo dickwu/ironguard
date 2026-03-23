@@ -4,6 +4,7 @@ pub mod handshake;
 pub mod peer;
 pub mod queue;
 pub mod router;
+pub mod session;
 pub mod timers;
 pub mod types;
 pub mod workers;
