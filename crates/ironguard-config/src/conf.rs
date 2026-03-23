@@ -346,6 +346,7 @@ impl PeerBuilder {
             persistent_keepalive: self.persistent_keepalive,
             comment: None,
             pq_public_key: None,
+            quic_port: None,
         })
     }
 }

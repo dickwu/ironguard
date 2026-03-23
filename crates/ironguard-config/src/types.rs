@@ -94,6 +94,10 @@ pub struct PeerConfig {
     /// Used for post-quantum key exchange when `post_quantum` is enabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pq_public_key: Option<String>,
+    /// Override the QUIC session port for this peer.
+    /// Defaults to endpoint port + 1 when not specified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quic_port: Option<u16>,
 }
 
 fn default_transport() -> String {

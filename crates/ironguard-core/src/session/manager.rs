@@ -142,11 +142,15 @@ impl SessionManager {
 
         let sni = "ironguard";
 
-        let connection = endpoint
-            .connect(peer_addr, sni)
-            .map_err(|e| SessionError::QuicDatagram(format!("connect: {e}")))?
-            .await
-            .map_err(|e| SessionError::QuicDatagram(format!("handshake: {e}")))?;
+        let connection = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            endpoint
+                .connect(peer_addr, sni)
+                .map_err(|e| SessionError::QuicDatagram(format!("connect: {e}")))?,
+        )
+        .await
+        .map_err(|_| SessionError::QuicDatagram(format!("handshake timeout connecting to {peer_addr}")))?
+        .map_err(|e| SessionError::QuicDatagram(format!("handshake: {e}")))?;
 
         let (keys, _peer_init) =
             exchange_data_plane_keys(&connection, Role::Client, data_port, receiver_id).await?;

@@ -848,8 +848,14 @@ async fn cmd_up_v2(interface: &str, config_path: &str, foreground: bool) -> Resu
             let data_port = iface_cfg.listen_port.unwrap_or(0);
             let receiver_id: u32 = rand::random();
 
+            // QUIC session connects to the peer's QUIC port. We derive it
+            // from the peer endpoint: use port+1 as a convention, or use
+            // the `quic.remote_port` config if available (defaults to endpoint port+1).
+            let quic_port = peer_cfg.quic_port.unwrap_or(addr.port() + 1);
+            let quic_addr: SocketAddr = (addr.ip(), quic_port).into();
+
             match session_mgr
-                .connect(pk_bytes, addr, data_port, receiver_id)
+                .connect(pk_bytes, quic_addr, data_port, receiver_id)
                 .await
             {
                 Ok(session) => {
@@ -1086,8 +1092,11 @@ async fn cmd_up_v2(interface: &str, config_path: &str, foreground: bool) -> Resu
             let data_port = iface_cfg.listen_port.unwrap_or(0);
             let receiver_id: u32 = rand::random();
 
+            let quic_port = peer_cfg.quic_port.unwrap_or(addr.port() + 1);
+            let quic_addr: SocketAddr = (addr.ip(), quic_port).into();
+
             match session_mgr
-                .connect(pk_bytes, addr, data_port, receiver_id)
+                .connect(pk_bytes, quic_addr, data_port, receiver_id)
                 .await
             {
                 Ok(session) => {
