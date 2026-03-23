@@ -8,7 +8,7 @@ use crate::types::{Key, KeyPair};
 use crate::workers::{tun_write_worker, udp_write_worker};
 
 use super::device::DeviceHandle;
-use super::messages::TransportHeader;
+use super::messages_v2;
 use super::types::Callbacks;
 
 use ironguard_platform::dummy::tun as dummy_tun;
@@ -494,8 +494,8 @@ async fn test_keepalive_on_key_add() {
     assert!(evt.is_some(), "keepalive should be sent to confirm key");
 
     let (size, _sent) = evt.unwrap();
-    // keepalive wire message: header(16) + tag(16) = 32
-    let keepalive_size = std::mem::size_of::<TransportHeader>() + 16;
+    // keepalive wire message: v2 header(16) + tag(16) = 32
+    let keepalive_size = messages_v2::HEADER_SIZE + 16;
     assert_eq!(size, keepalive_size, "keepalive should be header + tag");
 }
 

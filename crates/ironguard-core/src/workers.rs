@@ -11,7 +11,7 @@ use crate::constants::{
     TYPE_RESPONSE,
 };
 use crate::device::WireGuard;
-use crate::router::messages::TYPE_TRANSPORT;
+use crate::router::messages_v2;
 use crate::types::PublicKey;
 
 use ironguard_platform::endpoint::Endpoint;
@@ -103,16 +103,36 @@ pub async fn udp_worker<T: tun::Tun, B: udp::Udp>(wg: WireGuard<T, B>, reader: B
             continue;
         }
 
-        let msg_type = u32::from_le_bytes(msg[..4].try_into().unwrap());
-        match msg_type {
+        // Demux incoming messages. Legacy WireGuard handshake messages use a
+        // u32 LE type field (values 1-3) while v2 data frames use a single-byte
+        // type at offset 0.  Because v2 TYPE_DATA (0x01) overlaps with
+        // TYPE_INITIATION when read as u32 LE, we check the legacy handshake
+        // types first and fall through to v2 dispatch for everything else.
+        let msg_type_u32 = u32::from_le_bytes(msg[..4].try_into().unwrap());
+        match msg_type_u32 {
+            #[cfg(feature = "legacy-wireguard")]
             TYPE_COOKIE_REPLY | TYPE_INITIATION | TYPE_RESPONSE => {
                 wg.pending.fetch_add(1, Ordering::SeqCst);
                 wg.queue.send(HandshakeJob::Message(msg, src));
             }
-            TYPE_TRANSPORT => {
-                let _ = wg.router.recv(src, msg);
+            _ => {
+                // v2 frame dispatch on the first byte
+                if msg.len() < messages_v2::HEADER_SIZE {
+                    continue;
+                }
+                match msg[0] {
+                    messages_v2::TYPE_DATA | messages_v2::TYPE_KEEPALIVE => {
+                        let _ = wg.router.recv(src, msg);
+                    }
+                    messages_v2::TYPE_CONTROL => {
+                        // v2 control frames — stub, not yet implemented
+                    }
+                    messages_v2::TYPE_BATCH => {
+                        // v2 batch frames — stub, not yet implemented
+                    }
+                    _ => (),
+                }
             }
-            _ => (),
         }
     }
 }

@@ -16,7 +16,7 @@ use ironguard_platform::udp;
 
 use super::anti_replay::AntiReplay;
 use super::constants::PARALLEL_QUEUE_SIZE;
-use super::messages::{TYPE_TRANSPORT, TransportHeader};
+use super::messages_v2::{FrameHeader, HEADER_SIZE};
 use super::peer::{Peer, PeerHandle, new_peer};
 use super::queue::ParallelQueue;
 use super::receive::ReceiveJob;
@@ -193,19 +193,14 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> DeviceHand
 
     /// Receive an encrypted transport message.
     pub fn recv(&self, src: E, msg: Vec<u8>) -> Result<(), RouterError> {
-        // parse transport header
-        if msg.len() < std::mem::size_of::<TransportHeader>() {
+        // parse v2 frame header
+        if msg.len() < HEADER_SIZE {
             return Err(RouterError::MalformedTransportMessage);
         }
 
-        let header = unsafe { &*(msg.as_ptr() as *const TransportHeader) };
+        let header = FrameHeader::from_bytes(&msg).ok_or(RouterError::MalformedTransportMessage)?;
 
-        debug_assert!(
-            header.message_type() == TYPE_TRANSPORT,
-            "this should be checked by the message type multiplexer"
-        );
-
-        let receiver_id = header.receiver();
+        let receiver_id = header.receiver_id();
 
         // lookup peer based on receiver id
         let dec = self.state.recv.read();

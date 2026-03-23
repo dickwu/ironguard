@@ -1,7 +1,7 @@
 use crate::constants::{REJECT_AFTER_MESSAGES, SIZE_MESSAGE_PREFIX};
 use crate::types::KeyPair;
 
-use super::messages::{TYPE_TRANSPORT, TransportHeader};
+use super::messages_v2::{FrameHeader, HEADER_SIZE};
 use super::peer::Peer;
 use super::queue::{ParallelJob, Queue, SequentialJob};
 use super::types::Callbacks;
@@ -17,9 +17,8 @@ use ring::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
 use spin::Mutex;
 
 const SIZE_TAG: usize = 16;
-const HEADER_SIZE: usize = std::mem::size_of::<TransportHeader>();
 
-/// Offset where the transport header is written in the buffer.
+/// Offset where the v2 frame header is written in the buffer.
 /// The header sits just before the IP packet data at SIZE_MESSAGE_PREFIX.
 const HEADER_OFFSET: usize = SIZE_MESSAGE_PREFIX - HEADER_SIZE;
 
@@ -82,12 +81,9 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> ParallelJo
                 "should be checked when assigning counters"
             );
 
-            // Write transport header at HEADER_OFFSET (just before the IP packet)
-            let header =
-                unsafe { &mut *(msg.as_mut_ptr().add(HEADER_OFFSET) as *mut TransportHeader) };
-            header.set_type(TYPE_TRANSPORT);
-            header.set_receiver(job.keypair.send.id);
-            header.set_counter(job.counter);
+            // Construct v2 frame header and write it at HEADER_OFFSET
+            let frame = FrameHeader::new_data(job.keypair.send.id, job.counter);
+            msg[HEADER_OFFSET..HEADER_OFFSET + HEADER_SIZE].copy_from_slice(frame.as_bytes());
 
             // Encrypt IP packet data (starts at SIZE_MESSAGE_PREFIX, ends before tag)
             let end = msg.len() - SIZE_TAG;
@@ -98,10 +94,11 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> ParallelJo
             nonce_bytes[4..].copy_from_slice(&job.counter.to_le_bytes());
             let nonce = Nonce::assume_unique_for_key(nonce_bytes);
 
+            // Use the full 16-byte v2 header as AAD to prevent header tampering
             let key =
                 LessSafeKey::new(UnboundKey::new(&AES_256_GCM, &job.keypair.send.key[..]).unwrap());
             let tag = key
-                .seal_in_place_separate_tag(nonce, Aad::empty(), plaintext)
+                .seal_in_place_separate_tag(nonce, Aad::from(frame.as_aad()), plaintext)
                 .unwrap();
 
             // Write tag at the end

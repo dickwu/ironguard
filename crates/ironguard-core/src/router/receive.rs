@@ -2,7 +2,7 @@ use crate::constants::REJECT_AFTER_MESSAGES;
 
 use super::device::DecryptionState;
 use super::ip::inner_length;
-use super::messages::TransportHeader;
+use super::messages_v2::{FrameHeader, HEADER_SIZE, TYPE_DATA};
 use super::queue::{ParallelJob, Queue, SequentialJob};
 use super::types::Callbacks;
 
@@ -66,28 +66,38 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> ParallelJo
             let mut msg = job.buffer.lock();
 
             let ok = (|| {
-                let header_size = std::mem::size_of::<TransportHeader>();
-                if msg.1.len() < header_size + SIZE_TAG {
+                if msg.1.len() < HEADER_SIZE + SIZE_TAG {
                     return false;
                 }
 
-                // parse header
-                let header = unsafe { &*(msg.1.as_ptr() as *const TransportHeader) };
+                // parse v2 frame header (copy to local to release the immutable borrow)
+                let header = match FrameHeader::from_bytes(&msg.1) {
+                    Some(h) => *h,
+                    None => return false,
+                };
+
+                // verify message type
+                if header.msg_type() != TYPE_DATA {
+                    return false;
+                }
 
                 let counter = header.counter();
+
+                // Copy the AAD bytes before taking a mutable borrow on the buffer
+                let aad_bytes: [u8; HEADER_SIZE] = *header.as_bytes();
 
                 // create nonce
                 let mut nonce_bytes = [0u8; 12];
                 nonce_bytes[4..].copy_from_slice(&counter.to_le_bytes());
                 let nonce = Nonce::assume_unique_for_key(nonce_bytes);
 
-                // decrypt
+                // Use the full 16-byte v2 header as AAD for authenticated decryption
                 let key = LessSafeKey::new(
                     UnboundKey::new(&AES_256_GCM, &job.state.keypair.recv.key[..]).unwrap(),
                 );
 
-                let packet = &mut msg.1[header_size..];
-                match key.open_in_place(nonce, Aad::empty(), packet) {
+                let packet = &mut msg.1[HEADER_SIZE..];
+                match key.open_in_place(nonce, Aad::from(&aad_bytes[..]), packet) {
                     Ok(_) => (),
                     Err(_) => return false,
                 }
@@ -130,14 +140,16 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> Sequential
         let mut msg = job.buffer.lock();
         let endpoint = msg.0.take();
 
-        // parse transport header
-        let header_size = std::mem::size_of::<TransportHeader>();
-        if msg.1.len() < header_size {
+        // parse v2 frame header
+        if msg.1.len() < HEADER_SIZE {
             // authentication failure (truncated to 0)
             return;
         }
 
-        let header = unsafe { &*(msg.1.as_ptr() as *const TransportHeader) };
+        let header = match FrameHeader::from_bytes(&msg.1) {
+            Some(h) => h,
+            None => return,
+        };
 
         // check for replay
         if !job.state.protector.lock().update(header.counter()) {
@@ -153,7 +165,7 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> Sequential
         *peer.endpoint.lock() = endpoint;
 
         // check if should be written to TUN
-        let packet = &msg.1[header_size..];
+        let packet = &msg.1[HEADER_SIZE..];
         if let Some(inner) = inner_length(packet) {
             if inner + SIZE_TAG <= packet.len() {
                 let buf = packet[..inner].to_vec();

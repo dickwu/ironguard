@@ -1,10 +1,13 @@
 // IronGuard v2 frame format
 // 16-byte header: Type(8) | Flags(8) | Reserved(16) | ReceiverID(32) | Counter(64)
-
-pub const TYPE_DATA: u8 = 0x01;
-pub const TYPE_KEEPALIVE: u8 = 0x02;
-pub const TYPE_CONTROL: u8 = 0x03;
-pub const TYPE_BATCH: u8 = 0x04;
+//
+// Type values start at 0x04 to coexist with legacy WireGuard handshake message
+// types (1=Initiation, 2=Response, 3=CookieReply) which share the wire and use
+// a u32 LE type field in the same first-four-byte position.
+pub const TYPE_DATA: u8 = 0x04;
+pub const TYPE_KEEPALIVE: u8 = 0x05;
+pub const TYPE_CONTROL: u8 = 0x06;
+pub const TYPE_BATCH: u8 = 0x07;
 
 pub const HEADER_SIZE: usize = 16;
 pub const BATCH_HEADER_SIZE: usize = 20;
