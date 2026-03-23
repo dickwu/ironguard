@@ -11,15 +11,18 @@ use tokio::runtime::Runtime;
 use tokio::sync::Notify;
 use tokio::sync::mpsc as tokio_mpsc;
 
+#[cfg(feature = "legacy-wireguard")]
 use crate::handshake;
 use crate::peer::PeerInner;
 use crate::queue::ParallelQueue;
 use crate::router;
 use crate::timers::{TIMERS_TICK, TIMERS_TICK_IDLE};
-use crate::types::{PublicKey, StaticSecret};
-use crate::workers::{
-    HandshakeJob, handshake_worker, tun_worker, tun_write_worker, udp_worker, udp_write_worker,
-};
+use crate::types::PublicKey;
+#[cfg(feature = "legacy-wireguard")]
+use crate::types::StaticSecret;
+#[cfg(feature = "legacy-wireguard")]
+use crate::workers::handshake_worker;
+use crate::workers::{HandshakeJob, tun_worker, tun_write_worker, udp_worker, udp_write_worker};
 
 use ironguard_platform::tun;
 use ironguard_platform::udp;
@@ -41,7 +44,8 @@ pub struct WireGuardInner<T: tun::Tun, B: udp::Udp> {
     // current MTU (0 = device down)
     pub mtu: AtomicUsize,
 
-    // handshake device + peer map
+    // handshake device + peer map (legacy WireGuard Noise handshake)
+    #[cfg(feature = "legacy-wireguard")]
     #[allow(clippy::type_complexity)]
     pub peers: RwLock<
         handshake::device::Device<
@@ -113,6 +117,7 @@ impl<T: tun::Tun, B: udp::Udp> WireGuard<T, B> {
         let _guard = runtime.enter();
 
         // handshake queue
+        #[allow(unused_mut)]
         let (tx, mut rxs) = ParallelQueue::new(cpus, 128);
 
         // Create bounded channels for decoupled I/O writes.
@@ -134,6 +139,7 @@ impl<T: tun::Tun, B: udp::Udp> WireGuard<T, B> {
                 last_under_load: Mutex::new(Instant::now() - TIME_HORIZON),
                 router,
                 pending: AtomicUsize::new(0),
+                #[cfg(feature = "legacy-wireguard")]
                 peers: RwLock::new(handshake::device::Device::new()),
                 queue: tx,
                 peer_handles: RwLock::new(HashMap::new()),
@@ -148,11 +154,14 @@ impl<T: tun::Tun, B: udp::Udp> WireGuard<T, B> {
         // NOTE: UDP write worker is spawned lazily via set_writer(),
         // since the UDP writer is not available at device creation time.
 
-        // start handshake workers as async tasks
+        // start handshake workers as async tasks (legacy WireGuard)
+        #[cfg(feature = "legacy-wireguard")]
         while let Some(rx) = rxs.pop() {
             let wg2 = wg.clone();
             wg.runtime.spawn(handshake_worker(wg2, rx));
         }
+        #[cfg(not(feature = "legacy-wireguard"))]
+        drop(rxs);
 
         wg
     }
@@ -206,9 +215,12 @@ impl<T: tun::Tun, B: udp::Udp> WireGuard<T, B> {
 
         let peer_handle = self.router.new_peer(peer_inner);
 
-        // Add to handshake device
-        let peers = self.peers.write();
-        peers.add(pk.clone(), peer_handle.clone());
+        // Add to legacy handshake device (if enabled)
+        #[cfg(feature = "legacy-wireguard")]
+        {
+            let peers = self.peers.write();
+            peers.add(pk.clone(), peer_handle.clone());
+        }
 
         // Store the handle
         self.peer_handles
@@ -218,6 +230,7 @@ impl<T: tun::Tun, B: udp::Udp> WireGuard<T, B> {
     }
 
     pub fn remove_peer(&self, pk: &PublicKey) {
+        #[cfg(feature = "legacy-wireguard")]
         self.peers.write().remove(pk);
         self.peer_handles.write().remove(pk.as_bytes());
     }
@@ -239,10 +252,12 @@ impl<T: tun::Tun, B: udp::Udp> WireGuard<T, B> {
 
     // ── key management ───────────────────────────────────────────────────
 
+    #[cfg(feature = "legacy-wireguard")]
     pub fn set_key(&self, sk: Option<StaticSecret>) {
         self.peers.write().set_sk(sk);
     }
 
+    #[cfg(feature = "legacy-wireguard")]
     pub fn set_psk(&self, pk: &PublicKey, psk: [u8; 32]) {
         self.peers.write().set_psk(pk, psk);
     }
@@ -354,7 +369,7 @@ impl<T: tun::Tun, B: udp::Udp> WireGuard<T, B> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "legacy-wireguard"))]
 mod tests {
     use super::*;
     use crate::constants::SIZE_MESSAGE_PREFIX;

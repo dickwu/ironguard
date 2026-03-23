@@ -1,14 +1,16 @@
 use std::sync::atomic::Ordering;
+#[cfg(feature = "legacy-wireguard")]
 use std::time::Instant;
 
 use tokio::sync::mpsc;
 
+#[cfg(feature = "legacy-wireguard")]
+use crate::constants::{DURATION_UNDER_LOAD, MAX_QUEUED_INCOMING_HANDSHAKES, THRESHOLD_UNDER_LOAD};
 use crate::constants::{
-    DURATION_UNDER_LOAD, MAX_QUEUED_INCOMING_HANDSHAKES, MESSAGE_PADDING_MULTIPLE,
-    SIZE_MESSAGE_PREFIX, THRESHOLD_UNDER_LOAD,
+    MESSAGE_PADDING_MULTIPLE, SIZE_MESSAGE_PREFIX, TYPE_COOKIE_REPLY, TYPE_INITIATION,
+    TYPE_RESPONSE,
 };
 use crate::device::WireGuard;
-use crate::handshake::messages::{TYPE_COOKIE_REPLY, TYPE_INITIATION, TYPE_RESPONSE};
 use crate::router::messages::TYPE_TRANSPORT;
 use crate::types::PublicKey;
 
@@ -140,6 +142,7 @@ pub async fn udp_write_worker<E: Endpoint, B: udp::UdpWriter<E>>(
 ///
 /// Runs as a Tokio task. The handshake processing itself is CPU-bound
 /// but fast enough to run on the async runtime.
+#[cfg(feature = "legacy-wireguard")]
 pub async fn handshake_worker<T: tun::Tun, B: udp::Udp>(
     wg: WireGuard<T, B>,
     mut rx: mpsc::Receiver<HandshakeJob<B::Endpoint>>,

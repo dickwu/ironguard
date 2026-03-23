@@ -20,6 +20,11 @@ pub const MESSAGE_PADDING_MULTIPLE: usize = 16;
 
 pub const SIZE_MESSAGE_PREFIX: usize = 64;
 
+// WireGuard handshake message type identifiers.
+pub const TYPE_INITIATION: u32 = 1;
+pub const TYPE_RESPONSE: u32 = 2;
+pub const TYPE_COOKIE_REPLY: u32 = 3;
+
 /// Conservative TUN MTU that covers both IPv4 and IPv6 outer headers.
 /// 1500 (Ethernet MTU) - 60 (IPv6 header) - 8 (UDP) - 4 (type) - 8 (nonce) = 1420
 pub const TUN_MTU: usize = 1420;

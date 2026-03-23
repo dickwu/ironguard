@@ -8,10 +8,10 @@ rust-version.workspace = true
 
 [dependencies]
 ring = { workspace = true }
-snow = { workspace = true }
-blake2b_simd = { workspace = true }
-blake2s_simd = { workspace = true }
-chacha20poly1305 = { workspace = true }
+snow = { workspace = true, optional = true }
+blake2b_simd = { workspace = true, optional = true }
+blake2s_simd = { workspace = true, optional = true }
+chacha20poly1305 = { workspace = true, optional = true }
 zeroize = { workspace = true }
 subtle = { workspace = true }
 rand = { workspace = true }
@@ -41,6 +41,8 @@ serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 
 [features]
+default = ["legacy-wireguard"]
+legacy-wireguard = ["dep:snow", "dep:blake2s_simd", "dep:blake2b_simd", "dep:chacha20poly1305"]
 pq = ["dep:ml-kem", "dep:rand_core_06"]
 quic = ["dep:quinn", "dep:rustls", "dep:rcgen", "dep:serde", "dep:serde_json"]
 
