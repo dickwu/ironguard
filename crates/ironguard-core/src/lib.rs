@@ -5,6 +5,7 @@ pub mod peer;
 pub mod pipeline;
 pub mod queue;
 pub mod router;
+pub mod session;
 pub mod timers;
 pub mod types;
 pub mod workers;
