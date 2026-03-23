@@ -109,8 +109,7 @@ async fn main() -> Result<()> {
             cmd_up(&interface, &config, foreground).await?;
         }
         Commands::Down { interface } => {
-            tracing::info!(interface = %interface, "stopping interface");
-            eprintln!("ironguard down: not yet implemented");
+            cmd_down(&interface)?;
         }
         Commands::Status { interface, config } => {
             cmd_status(interface.as_deref(), config.as_deref())?;
@@ -288,13 +287,15 @@ async fn cmd_up(interface: &str, config_path: &str, foreground: bool) -> Result<
     let stop = Arc::new(AtomicBool::new(false));
     let _timer = wg.start_timer_task(stop.clone());
 
+    write_pid_file(interface)?;
     eprintln!("interface {interface} is up (mtu={mtu})");
 
-    // 11. Wait for Ctrl+C
+    // 11. Wait for Ctrl+C or SIGTERM
     tokio::signal::ctrl_c().await?;
 
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     wg.down();
+    remove_pid_file(interface);
     eprintln!("interface {interface} is down");
 
     Ok(())
@@ -423,12 +424,14 @@ async fn cmd_up_quic(
     let stop = Arc::new(AtomicBool::new(false));
     let _timer = wg.start_timer_task(stop.clone());
 
+    write_pid_file(interface)?;
     eprintln!("interface {interface} is up (mtu={mtu}, transport=quic)");
 
     tokio::signal::ctrl_c().await?;
 
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     wg.down();
+    remove_pid_file(interface);
     eprintln!("interface {interface} is down");
 
     Ok(())
@@ -476,7 +479,6 @@ async fn cmd_up(interface: &str, config_path: &str, foreground: bool) -> Result<
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
 fn resolve_endpoint(endpoint: &str) -> Result<std::net::SocketAddr> {
     // Try direct parse first
     if let Ok(addr) = endpoint.parse::<std::net::SocketAddr>() {
@@ -496,7 +498,6 @@ fn resolve_endpoint(endpoint: &str) -> Result<std::net::SocketAddr> {
         .ok_or_else(|| anyhow!("endpoint {endpoint} resolved to no addresses"))
 }
 
-#[cfg(target_os = "macos")]
 fn parse_cidr(cidr: &str) -> Result<(std::net::IpAddr, u32)> {
     let parts: Vec<&str> = cidr.split('/').collect();
     if parts.len() != 2 {
@@ -659,6 +660,62 @@ fn cmd_export(json_path: &str, interface: &str, output: Option<&str>) -> Result<
 }
 
 // ---------------------------------------------------------------------------
+// PID file helpers — used by cmd_up* to support `ironguard down`
+// ---------------------------------------------------------------------------
+
+fn pid_file_path(interface: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(format!("/tmp/ironguard-{interface}.pid"))
+}
+
+fn write_pid_file(interface: &str) -> Result<()> {
+    let path = pid_file_path(interface);
+    std::fs::write(&path, std::process::id().to_string())
+        .map_err(|e| anyhow!("failed to write PID file {}: {e}", path.display()))?;
+    Ok(())
+}
+
+fn remove_pid_file(interface: &str) {
+    let _ = std::fs::remove_file(pid_file_path(interface));
+}
+
+fn cmd_down(interface: &str) -> Result<()> {
+    let path = pid_file_path(interface);
+    let pid_str = std::fs::read_to_string(&path)
+        .map_err(|_| anyhow!("interface {interface} is not running (no PID file at {})", path.display()))?;
+    let pid: i32 = pid_str
+        .trim()
+        .parse()
+        .map_err(|e| anyhow!("invalid PID in {}: {e}", path.display()))?;
+
+    // Send SIGTERM to the running process.
+    #[cfg(unix)]
+    {
+        use std::io;
+        // SAFETY: sending a signal to a valid PID is safe.
+        let ret = unsafe { libc::kill(pid, libc::SIGTERM) };
+        if ret != 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::PermissionDenied {
+                return Err(anyhow!("permission denied sending SIGTERM to PID {pid}"));
+            }
+            // ESRCH = no such process — stale PID file
+            remove_pid_file(interface);
+            return Err(anyhow!(
+                "process {pid} not found (stale PID file removed); interface may already be down"
+            ));
+        }
+        eprintln!("sent SIGTERM to ironguard PID {pid} (interface {interface})");
+    }
+
+    #[cfg(not(unix))]
+    {
+        return Err(anyhow!("ironguard down is only supported on Unix platforms"));
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // cmd_up_v2 — QUIC session-based startup path
 // ---------------------------------------------------------------------------
 
@@ -704,10 +761,8 @@ async fn cmd_up_v2(interface: &str, config_path: &str, foreground: bool) -> Resu
         eprintln!("warning: {w}");
     }
 
-    // 2. Load private key (validated even though the QUIC session path
-    //    derives transport keys from TLS; future iterations may use it for
-    //    static identity assertions).
-    let _sk_bytes = ironguard_config::load_private_key(iface_cfg)
+    // 2. Load private key — used for static identity and legacy fallback.
+    let sk_bytes = ironguard_config::load_private_key(iface_cfg)
         .map_err(|e| anyhow!("failed to load private key: {e}"))?;
 
     if !foreground {
@@ -721,6 +776,10 @@ async fn cmd_up_v2(interface: &str, config_path: &str, foreground: bool) -> Resu
     // 4. Create WireGuard device (raw UDP data plane)
     type Wg = ironguard_core::device::WireGuard<MacosTun, MacosUdp>;
     let wg: Wg = ironguard_core::device::WireGuard::new(tun_writer);
+
+    // Set private key on the device so legacy handshake fallback works.
+    let sk = ironguard_core::StaticSecret::from_bytes(sk_bytes);
+    wg.set_key(Some(sk));
 
     // 5. Build SessionManager from QUIC config
     let quic_cfg = iface_cfg
@@ -804,7 +863,11 @@ async fn cmd_up_v2(interface: &str, config_path: &str, foreground: bool) -> Resu
                     handle.add_keypair(keypair);
                 }
                 Err(e) => {
-                    eprintln!("  peer {i}: QUIC session failed: {e} (falling back to legacy)");
+                    tracing::warn!(
+                        peer = i,
+                        error = %e,
+                        "QUIC session failed; peer will use legacy Noise handshake on first data"
+                    );
                 }
             }
         }
@@ -840,16 +903,18 @@ async fn cmd_up_v2(interface: &str, config_path: &str, foreground: bool) -> Resu
     let stop = Arc::new(AtomicBool::new(false));
     let _timer = wg.start_timer_task(stop.clone());
 
+    write_pid_file(interface)?;
     eprintln!(
         "interface {interface} is up (mtu={mtu}, transport=quic-session, sessions={})",
         session_mgr.session_count()
     );
 
-    // 11. Wait for Ctrl+C
+    // 11. Wait for Ctrl+C or SIGTERM
     tokio::signal::ctrl_c().await?;
 
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     wg.down();
+    remove_pid_file(interface);
     eprintln!("interface {interface} is down");
 
     Ok(())
@@ -888,10 +953,8 @@ async fn cmd_up_v2(interface: &str, config_path: &str, foreground: bool) -> Resu
         eprintln!("warning: {w}");
     }
 
-    // 2. Load private key (validated even though the QUIC session path
-    //    derives transport keys from TLS; future iterations may use it for
-    //    static identity assertions).
-    let _sk_bytes = ironguard_config::load_private_key(iface_cfg)
+    // 2. Load private key — used for static identity and legacy fallback.
+    let sk_bytes = ironguard_config::load_private_key(iface_cfg)
         .map_err(|e| anyhow!("failed to load private key: {e}"))?;
 
     if !foreground {
@@ -905,6 +968,10 @@ async fn cmd_up_v2(interface: &str, config_path: &str, foreground: bool) -> Resu
     // 4. Create WireGuard device (raw UDP data plane)
     type Wg = ironguard_core::device::WireGuard<LinuxTun, LinuxUdp>;
     let wg: Wg = ironguard_core::device::WireGuard::new(tun_writer);
+
+    // Set private key on the device so legacy handshake fallback works.
+    let sk = ironguard_core::StaticSecret::from_bytes(sk_bytes);
+    wg.set_key(Some(sk));
 
     // 5. Build SessionManager from QUIC config
     let quic_cfg = iface_cfg
@@ -981,7 +1048,11 @@ async fn cmd_up_v2(interface: &str, config_path: &str, foreground: bool) -> Resu
                     handle.add_keypair(keypair);
                 }
                 Err(e) => {
-                    eprintln!("  peer {i}: QUIC session failed: {e} (falling back to legacy)");
+                    tracing::warn!(
+                        peer = i,
+                        error = %e,
+                        "QUIC session failed; peer will use legacy Noise handshake on first data"
+                    );
                 }
             }
         }
@@ -1017,16 +1088,18 @@ async fn cmd_up_v2(interface: &str, config_path: &str, foreground: bool) -> Resu
     let stop = Arc::new(AtomicBool::new(false));
     let _timer = wg.start_timer_task(stop.clone());
 
+    write_pid_file(interface)?;
     eprintln!(
         "interface {interface} is up (mtu={mtu}, transport=quic-session, sessions={})",
         session_mgr.session_count()
     );
 
-    // 11. Wait for Ctrl+C
+    // 11. Wait for Ctrl+C or SIGTERM
     tokio::signal::ctrl_c().await?;
 
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     wg.down();
+    remove_pid_file(interface);
     eprintln!("interface {interface} is down");
 
     Ok(())
