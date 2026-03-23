@@ -21,6 +21,7 @@ arraydeque = { workspace = true }
 spin = { workspace = true }
 parking_lot = { workspace = true }
 crossbeam-channel = { workspace = true }
+crossbeam-queue = { workspace = true }
 ip_network_table-deps-treebitmap = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
