@@ -39,6 +39,33 @@ pub struct QuicConfig {
     pub port: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sni: Option<String>,
+    /// ALPN protocol identifier for the QUIC handshake.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alpn: Option<String>,
+    /// Path to a TLS certificate (PEM) for the QUIC endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cert_path: Option<String>,
+    /// Path to the TLS private key (PEM) for the QUIC endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_path: Option<String>,
+    /// QUIC session mode: how the QUIC connection is used.
+    #[serde(default)]
+    pub mode: QuicMode,
+    /// If true, use QUIC datagrams only (no streams).
+    #[serde(default)]
+    pub datagram_only: bool,
+}
+
+/// Controls how the QUIC session is used relative to the data plane.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuicMode {
+    /// QUIC is used only for the handshake / key exchange; the data plane
+    /// uses raw UDP.
+    #[default]
+    HandshakeOnly,
+    /// QUIC carries both the handshake and all data-plane traffic.
+    FullTransport,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

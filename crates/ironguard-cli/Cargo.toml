@@ -7,7 +7,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [features]
-quic = ["ironguard-platform/quic"]
+quic = ["ironguard-platform/quic", "ironguard-core/quic"]
 pq = ["ironguard-core/pq"]
 
 [[bin]]
