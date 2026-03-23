@@ -15,7 +15,7 @@ use crate::handshake;
 use crate::peer::PeerInner;
 use crate::queue::ParallelQueue;
 use crate::router;
-use crate::timers::TIMERS_TICK;
+use crate::timers::{TIMERS_TICK, TIMERS_TICK_IDLE};
 use crate::types::{PublicKey, StaticSecret};
 use crate::workers::{
     HandshakeJob, handshake_worker, tun_worker, tun_write_worker, udp_worker, udp_write_worker,
@@ -282,13 +282,17 @@ impl<T: tun::Tun, B: udp::Udp> WireGuard<T, B> {
 
     // ── timer task ────────────────────────────────────────────────────────
 
-    /// Spawn a Tokio task that ticks all peer timers every `TIMERS_TICK`.
+    /// Spawn a Tokio task that ticks all peer timers.
+    ///
+    /// Uses adaptive tick intervals: `TIMERS_TICK` (100ms) when any peer has
+    /// recent data activity, `TIMERS_TICK_IDLE` (1s) when all peers are idle.
     /// The task exits when `stop` is set to true.
     /// Returns a `JoinHandle` for the spawned task.
     pub fn start_timer_task(&self, stop: Arc<AtomicBool>) -> tokio::task::JoinHandle<()> {
         let wg = self.clone();
         self.runtime.spawn(async move {
-            let mut interval = tokio::time::interval(TIMERS_TICK);
+            let mut tick_duration = TIMERS_TICK;
+            let mut interval = tokio::time::interval(tick_duration);
             loop {
                 interval.tick().await;
 
@@ -299,8 +303,15 @@ impl<T: tun::Tun, B: udp::Udp> WireGuard<T, B> {
                 let now = Instant::now();
                 let handles = wg.peer_handles.read();
 
+                let mut any_active = false;
+
                 for (_, peer_handle) in handles.iter() {
                     let opaque = peer_handle.opaque();
+
+                    if !opaque.timers().is_idle(now) {
+                        any_active = true;
+                    }
+
                     let actions = opaque.timers().check_timers(now);
 
                     if actions.retransmit_handshake {
@@ -326,6 +337,17 @@ impl<T: tun::Tun, B: udp::Udp> WireGuard<T, B> {
                     if actions.new_handshake {
                         opaque.packet_send_queued_handshake_initiation(false);
                     }
+                }
+
+                // Adapt tick rate: fast when peers are active, slow when idle
+                let desired = if any_active {
+                    TIMERS_TICK
+                } else {
+                    TIMERS_TICK_IDLE
+                };
+                if desired != tick_duration {
+                    tick_duration = desired;
+                    interval = tokio::time::interval(tick_duration);
                 }
             }
         })

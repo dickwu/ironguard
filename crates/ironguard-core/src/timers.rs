@@ -20,6 +20,9 @@ pub struct Timers {
     sent_lastminute_handshake: AtomicBool,
     need_another_keepalive: AtomicBool,
 
+    // last time data was sent or received (for adaptive tick)
+    last_data: Mutex<Option<Instant>>,
+
     // timer deadlines
     retransmit_handshake: Mutex<Option<Instant>>,
     send_keepalive: Mutex<Option<Instant>>,
@@ -39,8 +42,14 @@ pub struct TimerActions {
     pub new_handshake: bool,
 }
 
-/// Interval between timer ticks (100ms).
+/// Interval between timer ticks when the peer is active (100ms).
 pub const TIMERS_TICK: Duration = Duration::from_millis(100);
+
+/// Interval between timer ticks when the peer is idle (1s).
+pub const TIMERS_TICK_IDLE: Duration = Duration::from_secs(1);
+
+/// Duration after which a peer is considered idle (no data in 10 seconds).
+pub const TIMERS_IDLE_THRESHOLD: Duration = Duration::from_secs(10);
 
 impl Timers {
     pub fn new(enabled: bool) -> Self {
@@ -50,6 +59,7 @@ impl Timers {
             handshake_attempts: AtomicUsize::new(0),
             sent_lastminute_handshake: AtomicBool::new(false),
             need_another_keepalive: AtomicBool::new(false),
+            last_data: Mutex::new(None),
             retransmit_handshake: Mutex::new(None),
             send_keepalive: Mutex::new(None),
             send_persistent_keepalive: Mutex::new(None),
@@ -97,6 +107,7 @@ impl Timers {
     /// Called after an authenticated data packet is sent.
     pub fn timers_data_sent(&self) {
         if self.enabled {
+            *self.last_data.lock() = Some(Instant::now());
             *self.new_handshake.lock() = Some(Instant::now() + KEEPALIVE_TIMEOUT + REKEY_TIMEOUT);
         }
     }
@@ -104,6 +115,7 @@ impl Timers {
     /// Called after an authenticated data packet is received.
     pub fn timers_data_received(&self) {
         if self.enabled {
+            *self.last_data.lock() = Some(Instant::now());
             let mut timer = self.send_keepalive.lock();
             if timer.is_none() {
                 *timer = Some(Instant::now() + KEEPALIVE_TIMEOUT);
@@ -186,6 +198,7 @@ impl Timers {
             return;
         }
         self.enabled = false;
+        *self.last_data.lock() = None;
         *self.retransmit_handshake.lock() = None;
         *self.send_keepalive.lock() = None;
         *self.send_persistent_keepalive.lock() = None;
@@ -204,6 +217,16 @@ impl Timers {
         self.enabled = true;
         if self.keepalive_interval > 0 {
             *self.send_persistent_keepalive.lock() = Some(Instant::now());
+        }
+    }
+
+    /// Returns true if this peer has been idle (no data) for longer than
+    /// `TIMERS_IDLE_THRESHOLD`.  Used by the device-level tick loop to
+    /// select a slower tick interval for idle peers.
+    pub fn is_idle(&self, now: Instant) -> bool {
+        match *self.last_data.lock() {
+            Some(last) => now.duration_since(last) > TIMERS_IDLE_THRESHOLD,
+            None => true,
         }
     }
 
@@ -510,5 +533,38 @@ mod tests {
         assert!(timers.send_keepalive.lock().is_none());
         // persistent_keepalive should be rescheduled (traversal)
         assert!(timers.send_persistent_keepalive.lock().is_some());
+    }
+
+    #[test]
+    fn test_is_idle_with_no_data() {
+        let timers = Timers::new(true);
+        // No data has ever been sent/received, so peer is idle
+        assert!(timers.is_idle(Instant::now()));
+    }
+
+    #[test]
+    fn test_is_idle_with_recent_data() {
+        let timers = Timers::new(true);
+        timers.timers_data_sent();
+        // Just sent data, so peer should not be idle
+        assert!(!timers.is_idle(Instant::now()));
+    }
+
+    #[test]
+    fn test_is_idle_after_threshold() {
+        let timers = Timers::new(true);
+        // Simulate data from 11 seconds ago
+        *timers.last_data.lock() = Some(Instant::now() - Duration::from_secs(11));
+        assert!(timers.is_idle(Instant::now()));
+    }
+
+    #[test]
+    fn test_stop_clears_last_data() {
+        let mut timers = Timers::new(true);
+        timers.timers_data_sent();
+        assert!(timers.last_data.lock().is_some());
+
+        timers.stop();
+        assert!(timers.last_data.lock().is_none());
     }
 }

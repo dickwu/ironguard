@@ -19,3 +19,7 @@ pub const DURATION_UNDER_LOAD: Duration = Duration::from_secs(1);
 pub const MESSAGE_PADDING_MULTIPLE: usize = 16;
 
 pub const SIZE_MESSAGE_PREFIX: usize = 64;
+
+/// Conservative TUN MTU that covers both IPv4 and IPv6 outer headers.
+/// 1500 (Ethernet MTU) - 60 (IPv6 header) - 8 (UDP) - 4 (type) - 8 (nonce) = 1420
+pub const TUN_MTU: usize = 1420;
