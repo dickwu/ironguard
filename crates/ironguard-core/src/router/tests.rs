@@ -501,3 +501,142 @@ async fn test_keepalive_on_key_add() {
 
 use ironguard_platform::endpoint::Endpoint;
 use ironguard_platform::udp::UdpReader;
+
+/// Full bidirectional pipeline test: two routers exchange 100 packets in each
+/// direction via dummy backends, verifying the v2 encrypt/decrypt path works
+/// end-to-end with the decoupled channel-based I/O pipeline.
+#[tokio::test]
+async fn test_v2_full_pipeline_bidirectional() {
+    const PACKET_COUNT: usize = 100;
+    const BODY_SIZE: usize = 100;
+
+    // -- Set up two routers connected via dummy UDP pair --
+    let (_, tun_writer1, _, _) = dummy_tun::create_pair();
+    let (_, tun_writer2, _, _) = dummy_tun::create_pair();
+
+    let (udp_readers1, udp_writer1, _, udp_readers2, udp_writer2, _) = dummy_udp::create_pair();
+
+    let router1 = make_test_router(tun_writer1, udp_writer1);
+    let router2 = make_test_router(tun_writer2, udp_writer2);
+
+    let opaque1 = Opaque::new();
+    let opaque2 = Opaque::new();
+
+    let peer1 = router1.new_peer(opaque1.clone());
+    let peer2 = router2.new_peer(opaque2.clone());
+
+    // peer1 (responder) accepts traffic from 192.168.1.0/24
+    peer1.add_allowed_ip("192.168.1.0".parse().unwrap(), 24);
+    peer1.add_keypair(dummy_keypair(false));
+
+    // peer2 (initiator) accepts traffic from 192.168.2.0/24
+    peer2.add_allowed_ip("192.168.2.0".parse().unwrap(), 24);
+    peer2.set_endpoint(dummy_udp::DummyEndpoint::from_address(
+        "127.0.0.1:9999".parse().unwrap(),
+    ));
+    peer2.add_keypair(dummy_keypair(true));
+
+    // -- Exchange keepalive to confirm the key on both sides --
+
+    // peer2 (initiator) sends keepalive automatically
+    let send_evt = opaque2.send.wait(TIMEOUT);
+    assert!(
+        send_evt.is_some(),
+        "peer2 should send confirmation keepalive"
+    );
+
+    // Read keepalive from udp_readers1 and pass to router1 for decryption
+    let reader1 = &udp_readers1[0];
+    let mut buf = vec![0u8; 4096];
+    let (len, from) = reader1.read(&mut buf).await.unwrap();
+    buf.truncate(len);
+    router1
+        .recv(from, buf)
+        .expect("router1 should process keepalive");
+
+    // Verify peer1 received and confirmed the key
+    assert!(
+        opaque1.recv.wait(TIMEOUT).is_some(),
+        "peer1 should receive keepalive"
+    );
+    assert_eq!(
+        opaque1.key_confirmed.wait(TIMEOUT),
+        Some(()),
+        "peer1 should confirm key"
+    );
+
+    // peer1 should now have an endpoint learned from the incoming packet
+    assert!(
+        peer1.get_endpoint().is_some(),
+        "peer1 should have learned endpoint"
+    );
+
+    // -- Send PACKET_COUNT packets from peer1 -> peer2 --
+    let reader2 = &udp_readers2[0];
+
+    for i in 0..PACKET_COUNT {
+        let ip_pkt = make_ipv4_packet(
+            "192.168.2.10".parse().unwrap(),
+            "192.168.1.20".parse().unwrap(),
+            BODY_SIZE,
+        );
+        router1
+            .send(pad(&ip_pkt))
+            .unwrap_or_else(|e| panic!("peer1->peer2 send #{i} failed: {e}"));
+
+        // Wait for send callback on router1 side
+        assert!(
+            opaque1.send.wait(TIMEOUT).is_some(),
+            "peer1 send event #{i} should fire"
+        );
+
+        // Read encrypted packet from router1's output, pass to router2
+        let mut buf2 = vec![0u8; 4096];
+        let (len2, from2) = reader2.read(&mut buf2).await.unwrap();
+        buf2.truncate(len2);
+        router2
+            .recv(from2, buf2)
+            .unwrap_or_else(|e| panic!("router2 recv #{i} failed: {e}"));
+
+        // Verify peer2 decrypted successfully
+        assert!(
+            opaque2.recv.wait(TIMEOUT).is_some(),
+            "peer2 recv event #{i} should fire"
+        );
+    }
+
+    // -- Send PACKET_COUNT packets from peer2 -> peer1 --
+    for i in 0..PACKET_COUNT {
+        let ip_pkt = make_ipv4_packet(
+            "192.168.1.20".parse().unwrap(),
+            "192.168.2.10".parse().unwrap(),
+            BODY_SIZE,
+        );
+        router2
+            .send(pad(&ip_pkt))
+            .unwrap_or_else(|e| panic!("peer2->peer1 send #{i} failed: {e}"));
+
+        assert!(
+            opaque2.send.wait(TIMEOUT).is_some(),
+            "peer2 send event #{i} should fire"
+        );
+
+        let mut buf1 = vec![0u8; 4096];
+        let (len1, from1) = reader1.read(&mut buf1).await.unwrap();
+        buf1.truncate(len1);
+        router1
+            .recv(from1, buf1)
+            .unwrap_or_else(|e| panic!("router1 recv #{i} failed: {e}"));
+
+        assert!(
+            opaque1.recv.wait(TIMEOUT).is_some(),
+            "peer1 recv event #{i} should fire"
+        );
+    }
+
+    // Verify no stray events remain
+    assert_eq!(opaque1.send.now(), None, "unexpected send event on peer1");
+    assert_eq!(opaque1.recv.now(), None, "unexpected recv event on peer1");
+    assert_eq!(opaque2.send.now(), None, "unexpected send event on peer2");
+    assert_eq!(opaque2.recv.now(), None, "unexpected recv event on peer2");
+}
