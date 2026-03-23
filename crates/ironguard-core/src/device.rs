@@ -27,6 +27,8 @@ use crate::workers::{HandshakeJob, tun_worker, tun_write_worker, udp_worker, udp
 use ironguard_platform::tun;
 use ironguard_platform::udp;
 
+use crate::pipeline::pool::BufferPool;
+
 /// Time horizon used to initialise timestamps in the past.
 const TIME_HORIZON: std::time::Duration = std::time::Duration::from_secs(3600);
 
@@ -70,6 +72,9 @@ pub struct WireGuardInner<T: tun::Tun, B: udp::Udp> {
     // Receiver end of the UDP write channel, consumed when set_writer() is called.
     #[allow(clippy::type_complexity)]
     pub udp_write_rx: Mutex<Option<tokio_mpsc::Receiver<(Vec<u8>, B::Endpoint)>>>,
+
+    // v2 pipeline buffer pool for zero-allocation packet processing
+    pub pool: Arc<BufferPool>,
 
     // Tokio runtime — owned by the device, used for spawning async tasks
     pub runtime: Runtime,
@@ -130,6 +135,9 @@ impl<T: tun::Tun, B: udp::Udp> WireGuard<T, B> {
         let router: router::DeviceHandle<B::Endpoint, PeerInner<T, B>, T::Writer, B::Writer> =
             router::DeviceHandle::new(cpus, tun_write_tx, udp_write_tx);
 
+        // v2 pipeline buffer pool — pre-allocated buffers for zero-allocation I/O
+        let pool = Arc::new(BufferPool::new());
+
         let wg = WireGuard {
             inner: Arc::new(WireGuardInner {
                 enabled: RwLock::new(false),
@@ -144,6 +152,7 @@ impl<T: tun::Tun, B: udp::Udp> WireGuard<T, B> {
                 queue: tx,
                 peer_handles: RwLock::new(HashMap::new()),
                 udp_write_rx: Mutex::new(Some(udp_write_rx)),
+                pool,
                 runtime,
             }),
         };

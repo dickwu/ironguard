@@ -158,6 +158,23 @@ impl BatchHeader {
     pub fn as_bytes(&self) -> &[u8; BATCH_HEADER_SIZE] {
         unsafe { &*(self as *const Self as *const [u8; BATCH_HEADER_SIZE]) }
     }
+
+    /// Interpret a byte slice as a `BatchHeader` reference.
+    ///
+    /// Returns `None` if the slice is shorter than `BATCH_HEADER_SIZE`.
+    ///
+    /// # Safety
+    ///
+    /// Safe because `BatchHeader` is `#[repr(C, packed)]` (alignment 1, no padding)
+    /// and we verify length before casting.
+    pub fn from_bytes(bytes: &[u8]) -> Option<&Self> {
+        if bytes.len() < BATCH_HEADER_SIZE {
+            return None;
+        }
+        // SAFETY: BatchHeader is repr(C, packed) so alignment is 1 and there is
+        // no padding. We verified the slice has at least BATCH_HEADER_SIZE bytes.
+        Some(unsafe { &*(bytes.as_ptr() as *const Self) })
+    }
 }
 
 #[cfg(test)]
@@ -209,5 +226,23 @@ mod tests {
     fn test_from_bytes_too_short() {
         let short = [0u8; 10];
         assert!(FrameHeader::from_bytes(&short).is_none());
+    }
+
+    #[test]
+    fn test_batch_header_from_bytes_roundtrip() {
+        let hdr = BatchHeader::new(42, 100, 8, 2048);
+        let bytes = hdr.as_bytes();
+        let parsed = BatchHeader::from_bytes(bytes).unwrap();
+        assert_eq!(parsed.frame.msg_type(), TYPE_BATCH);
+        assert_eq!(parsed.frame.receiver_id(), 42);
+        assert_eq!(parsed.frame.counter(), 100);
+        assert_eq!(parsed.batch_count(), 8);
+        assert_eq!(parsed.total_len(), 2048);
+    }
+
+    #[test]
+    fn test_batch_header_from_bytes_too_short() {
+        let short = [0u8; 19];
+        assert!(BatchHeader::from_bytes(&short).is_none());
     }
 }

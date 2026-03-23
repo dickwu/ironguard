@@ -680,8 +680,12 @@ fn remove_pid_file(interface: &str) {
 
 fn cmd_down(interface: &str) -> Result<()> {
     let path = pid_file_path(interface);
-    let pid_str = std::fs::read_to_string(&path)
-        .map_err(|_| anyhow!("interface {interface} is not running (no PID file at {})", path.display()))?;
+    let pid_str = std::fs::read_to_string(&path).map_err(|_| {
+        anyhow!(
+            "interface {interface} is not running (no PID file at {})",
+            path.display()
+        )
+    })?;
     let pid: i32 = pid_str
         .trim()
         .parse()
@@ -709,7 +713,9 @@ fn cmd_down(interface: &str) -> Result<()> {
 
     #[cfg(not(unix))]
     {
-        return Err(anyhow!("ironguard down is only supported on Unix platforms"));
+        return Err(anyhow!(
+            "ironguard down is only supported on Unix platforms"
+        ));
     }
 
     Ok(())
