@@ -67,6 +67,57 @@ impl PlatformCapabilities {
         let kern_minor: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
         (kern_major, kern_minor) >= (major, minor)
     }
+
+    /// Check whether an existing TUN device was created with `IFF_VNET_HDR`.
+    ///
+    /// This queries the kernel via `ioctl(TUNGETIFF)` on `/dev/net/tun` to
+    /// inspect the device flags. When `IFF_VNET_HDR` is set, the device
+    /// prepends a `virtio_net_hdr` to every packet, enabling GSO/GRO.
+    ///
+    /// Returns `false` as a safe default if detection fails (e.g., the device
+    /// does not exist, or the process lacks `CAP_NET_ADMIN`).
+    ///
+    /// # Platform
+    ///
+    /// Linux only. Requires the TUN device to already exist.
+    #[cfg(target_os = "linux")]
+    pub fn tun_supports_vnet_hdr(tun_name: &str) -> bool {
+        // IFF_VNET_HDR = 0x4000 (from linux/if_tun.h)
+        const IFF_VNET_HDR: libc::c_short = 0x4000;
+        // TUNGETIFF = _IOR('T', 210, sizeof(struct ifreq))
+        // On Linux amd64: 0x800454D2
+        const TUNGETIFF: libc::c_ulong = 0x800454D2;
+
+        let fd = unsafe { libc::open(b"/dev/net/tun\0".as_ptr() as *const _, libc::O_RDWR) };
+        if fd < 0 {
+            return false;
+        }
+
+        // struct ifreq is 40 bytes; we only need the first 16 (name) + 2 (flags)
+        let mut ifr = [0u8; 40];
+        let name_bytes = tun_name.as_bytes();
+        let copy_len = name_bytes.len().min(15); // IFNAMSIZ - 1
+        ifr[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+
+        // SAFETY: ifr is a valid stack buffer of the right size for struct ifreq,
+        // and fd is a valid open file descriptor for /dev/net/tun.
+        let ret = unsafe { libc::ioctl(fd, TUNGETIFF, ifr.as_mut_ptr()) };
+        unsafe { libc::close(fd) };
+
+        if ret < 0 {
+            return false;
+        }
+
+        // ifr_flags is at offset 16 in struct ifreq (a c_short = i16)
+        let flags = i16::from_ne_bytes([ifr[16], ifr[17]]);
+        (flags & IFF_VNET_HDR) != 0
+    }
+
+    /// Non-Linux stub: always returns `false`.
+    #[cfg(not(target_os = "linux"))]
+    pub fn tun_supports_vnet_hdr(_tun_name: &str) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]
@@ -99,5 +150,19 @@ mod tests {
         assert!(!caps.udp_sendmmsg);
         assert!(!caps.udp_gso);
         assert_eq!(caps.max_tun_queues, 1);
+    }
+
+    #[test]
+    fn test_vnet_hdr_nonexistent_device() {
+        // Querying a device that does not exist should return false, not panic.
+        let result = PlatformCapabilities::tun_supports_vnet_hdr("nonexistent99");
+        assert!(!result);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn test_vnet_hdr_non_linux_always_false() {
+        assert!(!PlatformCapabilities::tun_supports_vnet_hdr("wg0"));
+        assert!(!PlatformCapabilities::tun_supports_vnet_hdr(""));
     }
 }

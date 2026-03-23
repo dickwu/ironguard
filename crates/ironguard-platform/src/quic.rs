@@ -472,7 +472,7 @@ mod tests {
         let _ = tracing_subscriber::fmt::try_init();
 
         // 1. Start server on an OS-assigned port.
-        let server_config = QuicConfig {
+        let _server_config = QuicConfig {
             relay_addr: "127.0.0.1:0".parse().unwrap(),
             port: 0,
             sni: None,
