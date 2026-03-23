@@ -102,7 +102,7 @@ Replace the current hybrid architecture (OS threads + `block_on_io`) with a full
 **Stage 3: I/O Writers (async Tokio tasks)**
 - Consume encrypted/decrypted packets from bounded channel
 - Per-peer reorder buffer for in-order TUN delivery
-- Handle backpressure by dropping oldest packets (TCP retransmits)
+- Handle backpressure with per-peer tail-drop (newest packets dropped first for the most-active peer, preserving fairness). Control/keepalive frames bypass the data queue and are never dropped.
 - Never touch crypto keys
 
 ### Key Invariants
@@ -161,16 +161,74 @@ Each side's send_key equals the other side's recv_key. The labels are role-speci
 
 ### 4.3 Key Rotation
 
+**Important:** TLS 1.3 exporter secrets are fixed for the lifetime of a connection — `TLS-Exporter()` returns the same value regardless of `KeyUpdate`. Therefore, key rotation CANNOT use `KeyUpdate` to derive fresh data-plane keys.
+
+**Rekey mechanism: Epoch-based rotation via QUIC control messages.**
+
+Each rekey epoch introduces fresh entropy and new receiver IDs:
+
+```
+Initiator ---[QUIC DATAGRAM: RekeyInit {
+    epoch: u32,                    // monotonic epoch counter
+    fresh_entropy: [u8; 32],       // random nonce for this epoch
+    new_receiver_id: u32,          // receiver ID for new decryption state
+}]---> Responder
+
+Responder ---[QUIC DATAGRAM: RekeyAck {
+    epoch: u32,
+    fresh_entropy: [u8; 32],
+    new_receiver_id: u32,
+}]---> Initiator
+```
+
+**Key derivation for epoch N:**
+
+```
+epoch_secret = HKDF-Expand(
+    exporter_secret,
+    "ironguard-epoch" || epoch.to_le_bytes() || initiator_entropy || responder_entropy,
+    64
+)
+
+// Directional keys (same role-specific label pattern as initial keys)
+client_send_key_N = HKDF-Expand(epoch_secret, "ironguard-client-to-server", 32)
+client_recv_key_N = HKDF-Expand(epoch_secret, "ironguard-server-to-client", 32)
+```
+
+Each epoch produces provably different keys because `fresh_entropy` from both sides is mixed in. Counters reset to zero per epoch (safe because each epoch has unique keys).
+
+**Receiver ID lifecycle per rekey:**
+
+1. `RekeyInit` carries the initiator's new `receiver_id` for the next epoch
+2. `RekeyAck` carries the responder's new `receiver_id`
+3. Both sides install the new keypair as `KeyWheel.next`
+4. On first authenticated packet received with the new key, `confirm_key()` promotes `next -> current -> previous`
+5. Previous receiver IDs are retired after a grace period (2x rekey interval)
+
 | Trigger | Action |
 |---------|--------|
-| 120 seconds elapsed | TLS KeyUpdate -> new exporter -> rotate KeyWheel |
+| 120 seconds elapsed | Send RekeyInit with fresh entropy + new receiver ID |
 | 2^63 packets sent | Same (conservative counter exhaustion backstop) |
 | 2^60 bytes encrypted | Same (AES-GCM safety limit per NIST SP 800-38D) |
-| Connection migration | QUIC handles; data-plane keys unchanged |
+| Connection migration | See Section 4.3.2 |
 
-The existing `KeyWheel` (next/current/previous) is retained. Keys are now derived from TLS exporters instead of Noise handshake hashes.
+The existing `KeyWheel` (next/current/previous) is retained. The `REJECT_AFTER_MESSAGES` constant is set to `2^63 - 1024`.
 
-The `REJECT_AFTER_MESSAGES` constant is set to `2^63 - 1024` (matching the 64-bit counter space with margin for in-flight packets during rekey). The 120-second time-based rekey is the primary rotation mechanism; counter exhaustion is a safety backstop that should never trigger in practice.
+### 4.3.2 Raw UDP Data-Plane Migration
+
+In handshake-only mode, QUIC migration only covers the control connection. The raw UDP data plane uses a separate 5-tuple that must be migrated independently.
+
+**Migration flow:**
+
+1. When the QUIC control connection migrates (NAT rebind, IP change), the migrating side detects the new source address via `conn.remote_address()` changes
+2. The migrating side sends an authenticated QUIC DATAGRAM: `MigrationProbe { data_port, challenge: [u8; 16] }`
+3. The other side responds with `MigrationAck { challenge_response, new_data_endpoint }` via QUIC
+4. On receiving `MigrationAck`, the migrating side switches its raw UDP send path to the new endpoint
+5. The other side accepts raw UDP packets from the new source address only after validating the probe/ack exchange
+
+**Rollback:** If `MigrationAck` is not received within 5 seconds, the old data-plane endpoint is retained. The control channel (QUIC) continues working regardless.
+
+**Existing WireGuard roaming behavior is preserved:** When a valid authenticated data-plane packet arrives from a new source address, `PeerInner.endpoint` is updated opportunistically (same as WireGuard). The probe/ack exchange provides explicit migration; the roaming update provides implicit migration for cases where only the data-plane path changes.
 
 ### 4.3.1 0-RTT Resumption Security
 
@@ -215,6 +273,8 @@ The header retains 32-bit receiver IDs (preventing collision at scale) and 64-bi
 
 **Nonce construction:** 12 bytes = `[0x00; 4] || counter.to_le_bytes()`
 
+**AEAD Additional Authenticated Data (AAD):** The entire 16-byte header is passed as AAD to `AES_256_GCM.seal_in_place()` / `open_in_place()`. This binds the type, flags, receiver ID, and counter to the ciphertext, preventing header tampering without tag invalidation.
+
 The nonce uses only the counter, not the session_id. Each key is unique (derived from a unique TLS exporter), so counter uniqueness within a key lifetime guarantees nonce uniqueness. This matches the standard AES-GCM nonce construction pattern.
 
 **Why 32-bit receiver ID (not 16-bit):** With 3 active receiver IDs per peer (KeyWheel next/current/previous), 1000 peers = 3000 IDs. At 16 bits (65K space), collision probability per new ID is ~4.5%. At 32 bits (4B space), it is negligible.
@@ -234,22 +294,37 @@ The nonce uses only the counter, not the session_id. Each key is unique (derived
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |       Batch Count (16)        |     Total Payload Len (16)    |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|  AEAD(key, nonce, [                                           |
-|    pkt1_len:u16 | pkt1_data | pkt2_len:u16 | pkt2_data | ... |
-|  ])                                                           |
+|  AEAD(key, nonce,                                             |
+|    aad = full 20-byte header (type..batch_count..total_len),  |
+|    plaintext = [pkt1_len:u16|pkt1_data|pkt2_len:u16|pkt2|...] |
+|  )                                                            |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |                      AEAD Tag (128 bits)                      |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 ```
 
-Single AEAD operation encrypts the entire batch. One tag, one header for up to 64 packets.
+**Important: Batching is a syscall optimization, NOT a wire-format change.**
 
-**Batch frame constraints:**
-- Batch payload must fit in a single UDP datagram. Max batch payload = `min(65535 - 20 - 8 - 20 - 16, 64 * effective_mtu)` bytes
-- Without UDP GSO: max ~1400 bytes payload (typically 1 packet, making batch pointless). Batch frames are only useful with UDP GSO or on LAN with jumbo frames
-- With UDP GSO: up to 64KB per GSO segment, fitting ~42 packets of 1500 bytes each
+UDP GSO segments a large send into multiple independent UDP datagrams on the wire. The receiver cannot reliably reassemble them into one ciphertext. Therefore:
 
-**Loss amplification:** A single corrupted bit in a batch frame drops all packets in the batch. On lossy links, reduce batch size or disable batching. Recommended: `batch_size = 1` when measured loss > 0.1%.
+- **Each UDP datagram on the wire contains exactly one AEAD-authenticated message** (single-packet frame OR a small batch that fits in one datagram)
+- **Batching amortizes syscall overhead, not crypto overhead.** Multiple independently-encrypted frames are gathered into a single `sendmmsg`/GSO syscall
+- The batch frame format above is used ONLY when the entire batch fits within a single UDP datagram (max ~1400 bytes without jumbo frames — typically 1 packet)
+- For the common case (1400+ byte packets), each packet is individually encrypted with its own AEAD tag and sent as a separate datagram within a batched syscall
+
+**Syscall batching (primary optimization):**
+
+```
+// Stage 3 (UDP Writer) gathers N independently-encrypted frames:
+let frames: Vec<&[u8]> = batch.iter().map(|ref| pool.get(ref)).collect();
+sendmmsg(socket, &frames);  // one syscall, N datagrams
+```
+
+**Wire-format batching (small packets only):**
+
+The batch frame format is used when multiple small inner packets (e.g., ACKs, DNS queries < 200 bytes each) can fit in a single ~1400-byte datagram. This amortizes both the AEAD tag (16 bytes) and frame header (16 bytes) per batch. The batch frame MUST fit within a single UDP datagram (no reassembly protocol).
+
+**Loss amplification:** A single corrupted bit in a wire-format batch frame drops all packets in that batch. On lossy links, disable wire-format batching. Recommended: `wire_batch = false` when measured loss > 0.1%. Syscall batching (sendmmsg/GSO) is always safe since each datagram is independently authenticated.
 
 **Batching heuristic:**
 1. Accumulate packets for up to `BATCH_FLUSH_TIMEOUT` (default 50us)
@@ -274,21 +349,29 @@ QUIC retry tokens (RFC 9000 Section 8.1) replace WireGuard's MAC1/MAC2/cookie me
 Pre-allocated fixed-size buffer pool eliminates all per-packet heap allocation.
 
 ```rust
-const POOL_SIZE: usize = 8192;
-const BUF_SIZE: usize = 2048;   // MTU + headers + AEAD tag + padding
+// Two-tier buffer pool: small buffers for individual packets, large for batch assembly
+const SMALL_POOL_SIZE: usize = 8192;
+const SMALL_BUF_SIZE: usize = 2048;    // MTU + headers + AEAD tag + padding
+
+const LARGE_POOL_SIZE: usize = 128;
+const LARGE_BUF_SIZE: usize = 65536;   // max UDP GSO segment / batch assembly
 
 struct PacketRef {               // 8 bytes, passed by value
-    pool_idx: u16,               // which buffer (0..8191)
+    pool_idx: u16,               // which buffer (0..8191 small, 8192+ large)
     offset: u16,                 // data start within buffer
     len: u16,                    // data length
     peer_idx: u16,               // peer for routing/ordering
 }
 
 struct BufferPool {
-    storage: Box<[UnsafeCell<[u8; BUF_SIZE]>; POOL_SIZE]>,  // ~16 MB
-    free: crossbeam_queue::ArrayQueue<u16>,                   // lock-free
+    small: Box<[UnsafeCell<[u8; SMALL_BUF_SIZE]>; SMALL_POOL_SIZE]>,  // ~16 MB
+    large: Box<[UnsafeCell<[u8; LARGE_BUF_SIZE]>; LARGE_POOL_SIZE]>,  // ~8 MB
+    small_free: crossbeam_queue::ArrayQueue<u16>,
+    large_free: crossbeam_queue::ArrayQueue<u16>,
 }
 ```
+
+Individual packets use small buffers. Batch frame assembly and GRO super-packet reception use large buffers. The `pool_idx` range distinguishes the tier: `0..SMALL_POOL_SIZE` for small, `SMALL_POOL_SIZE..` for large.
 
 ### Operations
 
@@ -440,9 +523,13 @@ Crypto Pool (parallel, unordered)
 
 1. Stage 1 assigns monotonic per-peer sequence numbers before dispatching to crypto
 2. Stage 2 processes packets in any order, preserves sequence in PacketRef
-3. Stage 3 maintains per-peer `ReorderBuffer` (BTreeMap, max window 256)
+3. **On auth failure or anti-replay rejection, Stage 2 emits an explicit `DropMarker { peer_idx, seq }` to Stage 3** so the reorder buffer can skip that slot instead of waiting indefinitely
+4. Stage 3 maintains per-peer `ReorderBuffer` (BTreeMap, max window 256)
+5. The reorder buffer drains contiguous runs: when the next expected seq arrives (or a DropMarker for it), it advances and delivers all ready packets
 
-Anti-replay bitmap checked during decrypt (Stage 2), before reorder buffer.
+Anti-replay bitmap checked during decrypt (Stage 2), before reorder buffer. Failed packets emit DropMarkers rather than being silently dropped, preventing permanent holes in the sequence.
+
+**Timeout fallback:** If a sequence slot is neither filled nor explicitly dropped within 50ms, the reorder buffer skips it (covers the case where a DropMarker is lost due to channel backpressure).
 
 ---
 
