@@ -3,6 +3,7 @@ pub mod constants;
 pub mod device;
 mod ip;
 pub mod messages;
+pub mod messages_v2;
 pub mod peer;
 pub mod queue;
 mod receive;
