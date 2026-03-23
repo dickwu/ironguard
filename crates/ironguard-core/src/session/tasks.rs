@@ -234,15 +234,21 @@ pub async fn rekey_timer_task<K: KeyInstaller>(
 ///
 /// Used by the accept loop to identify which peer is connecting.
 /// Populated from the config at startup.
+///
+/// Peers without configured endpoints are stored as "wildcard" entries
+/// and will accept connections from any address.
 pub struct PeerLookup {
-    /// addr -> peer public key
+    /// addr -> peer public key (peers with known endpoints)
     entries: parking_lot::RwLock<Vec<(std::net::SocketAddr, [u8; 32])>>,
+    /// Peers without endpoints that accept connections from any address.
+    wildcard_peers: parking_lot::RwLock<Vec<[u8; 32]>>,
 }
 
 impl PeerLookup {
     pub fn new() -> Self {
         Self {
             entries: parking_lot::RwLock::new(Vec::new()),
+            wildcard_peers: parking_lot::RwLock::new(Vec::new()),
         }
     }
 
@@ -251,10 +257,20 @@ impl PeerLookup {
         self.entries.write().push((addr, peer_pk));
     }
 
+    /// Register a peer without a known address (server-side peer).
+    ///
+    /// Wildcard peers accept connections from any IP. When a connection
+    /// arrives from an unknown address, the first unclaimed wildcard peer
+    /// is returned.
+    pub fn add_wildcard(&self, peer_pk: [u8; 32]) {
+        self.wildcard_peers.write().push(peer_pk);
+    }
+
     /// Look up a peer public key by remote address.
     ///
-    /// Matches on IP address only (ignoring port) since QUIC clients
-    /// use ephemeral source ports.
+    /// First checks address-matched entries (IP only, ignoring port since
+    /// QUIC clients use ephemeral source ports). If no match, returns the
+    /// first wildcard peer (server-side peer without endpoint).
     pub fn lookup_by_addr(&self, addr: &std::net::SocketAddr) -> Option<[u8; 32]> {
         let entries = self.entries.read();
         for (entry_addr, pk) in entries.iter() {
@@ -262,7 +278,11 @@ impl PeerLookup {
                 return Some(*pk);
             }
         }
-        None
+        drop(entries);
+
+        // Fall back to wildcard peers (peers without configured endpoints).
+        let wildcards = self.wildcard_peers.read();
+        wildcards.first().copied()
     }
 }
 

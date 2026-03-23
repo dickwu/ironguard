@@ -881,6 +881,9 @@ async fn cmd_up_v2(interface: &str, config_path: &str, foreground: bool) -> Resu
                     );
                 }
             }
+        } else {
+            // Server-side peer without endpoint — accept from any address.
+            known_peers.add_wildcard(pk_bytes);
         }
 
         eprintln!(
@@ -922,7 +925,13 @@ async fn cmd_up_v2(interface: &str, config_path: &str, foreground: bool) -> Resu
 
     // Create a QUIC server endpoint for inbound connections.
     let server_config = make_test_server_config();
-    let quic_endpoint = quinn::Endpoint::server(server_config, bind_addr)
+    // Try the configured bind address first; fall back to an OS-assigned port
+    // if the SessionManager's connect() already bound that port.
+    let quic_endpoint = quinn::Endpoint::server(server_config.clone(), bind_addr)
+        .or_else(|_| {
+            let fallback: SocketAddr = (bind_addr.ip(), 0u16).into();
+            quinn::Endpoint::server(server_config, fallback)
+        })
         .map_err(|e| anyhow!("failed to create QUIC server endpoint: {e}"))?;
 
     let quic_listen_addr = quic_endpoint
@@ -1109,6 +1118,9 @@ async fn cmd_up_v2(interface: &str, config_path: &str, foreground: bool) -> Resu
                     );
                 }
             }
+        } else {
+            // Server-side peer without endpoint — accept from any address.
+            known_peers.add_wildcard(pk_bytes);
         }
 
         eprintln!(
@@ -1148,7 +1160,13 @@ async fn cmd_up_v2(interface: &str, config_path: &str, foreground: bool) -> Resu
     let wg_installer = Arc::new(WgKeyInstaller { wg: wg.clone() });
 
     let server_config = make_test_server_config();
-    let quic_endpoint = quinn::Endpoint::server(server_config, bind_addr)
+    // Try the configured bind address first; fall back to an OS-assigned port
+    // if the SessionManager's connect() already bound that port.
+    let quic_endpoint = quinn::Endpoint::server(server_config.clone(), bind_addr)
+        .or_else(|_| {
+            let fallback: SocketAddr = (bind_addr.ip(), 0u16).into();
+            quinn::Endpoint::server(server_config, fallback)
+        })
         .map_err(|e| anyhow!("failed to create QUIC server endpoint: {e}"))?;
 
     let quic_listen_addr = quic_endpoint
