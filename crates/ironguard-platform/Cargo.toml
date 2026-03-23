@@ -26,5 +26,8 @@ libc = "0.2"
 [target.'cfg(target_os = "macos")'.dependencies]
 tun-rs = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+tun-rs = { workspace = true }
+
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
