@@ -2,6 +2,7 @@ pub mod constants;
 pub mod device;
 pub mod handshake;
 pub mod peer;
+pub mod pipeline;
 pub mod queue;
 pub mod router;
 pub mod timers;
