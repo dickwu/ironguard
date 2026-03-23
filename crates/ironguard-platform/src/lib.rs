@@ -1,3 +1,4 @@
+pub mod capabilities;
 pub mod endpoint;
 pub mod tun;
 pub mod udp;
