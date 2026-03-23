@@ -11,7 +11,7 @@ use ironguard_platform::tun;
 use ironguard_platform::udp;
 
 use core::sync::atomic::{AtomicBool, Ordering};
-use ring::aead::{Aad, CHACHA20_POLY1305, LessSafeKey, Nonce, UnboundKey};
+use ring::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
 use spin::Mutex;
 use std::sync::Arc;
 
@@ -83,7 +83,7 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> ParallelJo
 
                 // decrypt
                 let key = LessSafeKey::new(
-                    UnboundKey::new(&CHACHA20_POLY1305, &job.state.keypair.recv.key[..]).unwrap(),
+                    UnboundKey::new(&AES_256_GCM, &job.state.keypair.recv.key[..]).unwrap(),
                 );
 
                 let packet = &mut msg.1[header_size..];
