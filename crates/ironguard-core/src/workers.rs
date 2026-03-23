@@ -115,6 +115,27 @@ pub async fn udp_worker<T: tun::Tun, B: udp::Udp>(wg: WireGuard<T, B>, reader: B
     }
 }
 
+/// TUN write worker: drains decrypted packets from the bounded channel and
+/// writes them to the TUN device. Runs as a dedicated Tokio task so that
+/// crypto workers never block on TUN I/O.
+pub async fn tun_write_worker<T: tun::Writer>(mut rx: mpsc::Receiver<Vec<u8>>, writer: T) {
+    while let Some(packet) = rx.recv().await {
+        let _ = writer.write(&packet).await;
+    }
+}
+
+/// UDP write worker: drains encrypted packets from the bounded channel and
+/// writes them to the UDP socket. Runs as a dedicated Tokio task so that
+/// crypto workers never block on UDP I/O.
+pub async fn udp_write_worker<E: Endpoint, B: udp::UdpWriter<E>>(
+    mut rx: mpsc::Receiver<(Vec<u8>, E)>,
+    writer: B,
+) {
+    while let Some((msg, mut endpoint)) = rx.recv().await {
+        let _ = writer.write(&msg, &mut endpoint).await;
+    }
+}
+
 /// Handshake worker: processes handshake jobs from the async mpsc channel.
 ///
 /// Runs as a Tokio task. The handshake processing itself is CPU-bound

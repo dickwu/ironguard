@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use crate::constants::SIZE_MESSAGE_PREFIX;
 use crate::types::{Key, KeyPair};
+use crate::workers::{tun_write_worker, udp_write_worker};
 
 use super::device::DeviceHandle;
 use super::messages::TransportHeader;
@@ -21,6 +22,9 @@ type TestRouter = DeviceHandle<
 >;
 
 const TIMEOUT: Duration = Duration::from_millis(1000);
+
+/// Channel capacity used for test write workers.
+const TEST_CHANNEL_CAP: usize = 256;
 
 // --- Event tracking infrastructure ---
 
@@ -190,17 +194,43 @@ fn make_ipv6_packet(src: std::net::Ipv6Addr, dst: std::net::Ipv6Addr, body_size:
     pkt
 }
 
+/// Create a test router with channels and spawned write workers.
+/// Returns the router. The TUN and UDP writers are consumed by write worker tasks.
+fn make_test_router(
+    tun_writer: dummy_tun::DummyTunWriter,
+    udp_writer: dummy_udp::DummyUdpWriter,
+) -> TestRouter {
+    let (tun_tx, tun_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(TEST_CHANNEL_CAP);
+    let (udp_tx, udp_rx) =
+        tokio::sync::mpsc::channel::<(Vec<u8>, dummy_udp::DummyEndpoint)>(TEST_CHANNEL_CAP);
+
+    let router: TestRouter = DeviceHandle::new(1, tun_tx, udp_tx);
+
+    // Spawn write workers on the current Tokio runtime.
+    tokio::spawn(tun_write_worker(tun_rx, tun_writer));
+    tokio::spawn(udp_write_worker(udp_rx, udp_writer));
+
+    // Mark outbound as ready (writer is now available via the channel).
+    router.set_outbound_ready();
+
+    router
+}
+
+/// Create a test router that does NOT need outbound writes (no UDP writer spawned).
+/// A dummy UDP pair is created internally; the writer goes to a write worker that
+/// sends into the void.
+fn make_test_router_no_outbound(tun_writer: dummy_tun::DummyTunWriter) -> TestRouter {
+    let (_, udp_writer, _, _, _, _) = dummy_udp::create_pair();
+    make_test_router(tun_writer, udp_writer)
+}
+
 // --- Tests ---
 
 #[tokio::test]
 async fn test_outbound_routing() {
     // Create a router with a dummy TUN and void UDP
     let (_, tun_writer, _, _) = dummy_tun::create_pair();
-    let router: TestRouter = DeviceHandle::new(1, tun_writer);
-
-    // Create a void UDP writer (sends into the void)
-    let (_, udp_writer, _, _, _, _) = dummy_udp::create_pair();
-    router.set_outbound_writer(udp_writer);
+    let router = make_test_router_no_outbound(tun_writer);
 
     // Add peer with allowed IPs
     let opaque = Opaque::new();
@@ -228,7 +258,7 @@ async fn test_outbound_routing() {
 #[tokio::test]
 async fn test_no_route_fails() {
     let (_, tun_writer, _, _) = dummy_tun::create_pair();
-    let router: TestRouter = DeviceHandle::new(1, tun_writer);
+    let router = make_test_router_no_outbound(tun_writer);
 
     // No peers added - routing should fail
     let ip_pkt = make_ipv4_packet(
@@ -243,7 +273,7 @@ async fn test_no_route_fails() {
 #[tokio::test]
 async fn test_no_key_triggers_need_key() {
     let (_, tun_writer, _, _) = dummy_tun::create_pair();
-    let router: TestRouter = DeviceHandle::new(1, tun_writer);
+    let router = make_test_router_no_outbound(tun_writer);
 
     let opaque = Opaque::new();
     let peer = router.new_peer(opaque.clone());
@@ -271,13 +301,10 @@ async fn test_bidirectional() {
     let (_, tun_writer1, _, _) = dummy_tun::create_pair();
     let (_, tun_writer2, _, _) = dummy_tun::create_pair();
 
-    let router1: TestRouter = DeviceHandle::new(1, tun_writer1);
-    let router2: TestRouter = DeviceHandle::new(1, tun_writer2);
-
-    // Connect via UDP pair
     let (udp_readers1, udp_writer1, _, udp_readers2, udp_writer2, _) = dummy_udp::create_pair();
-    router1.set_outbound_writer(udp_writer1);
-    router2.set_outbound_writer(udp_writer2);
+
+    let router1 = make_test_router(tun_writer1, udp_writer1);
+    let router2 = make_test_router(tun_writer2, udp_writer2);
 
     let opaque1 = Opaque::new();
     let opaque2 = Opaque::new();
@@ -371,12 +398,10 @@ async fn test_replay_rejected() {
     let (_, tun_writer1, _, _) = dummy_tun::create_pair();
     let (_, tun_writer2, _, _) = dummy_tun::create_pair();
 
-    let router1: TestRouter = DeviceHandle::new(1, tun_writer1);
-    let router2: TestRouter = DeviceHandle::new(1, tun_writer2);
-
     let (udp_readers1, udp_writer1, _, _, udp_writer2, _) = dummy_udp::create_pair();
-    router1.set_outbound_writer(udp_writer1);
-    router2.set_outbound_writer(udp_writer2);
+
+    let router1 = make_test_router(tun_writer1, udp_writer1);
+    let router2 = make_test_router(tun_writer2, udp_writer2);
 
     let opaque1 = Opaque::new();
     let opaque2 = Opaque::new();
@@ -433,10 +458,7 @@ async fn test_replay_rejected() {
 #[tokio::test]
 async fn test_outbound_ipv6() {
     let (_, tun_writer, _, _) = dummy_tun::create_pair();
-    let router: TestRouter = DeviceHandle::new(1, tun_writer);
-
-    let (_, udp_writer, _, _, _, _) = dummy_udp::create_pair();
-    router.set_outbound_writer(udp_writer);
+    let router = make_test_router_no_outbound(tun_writer);
 
     let opaque = Opaque::new();
     let peer = router.new_peer(opaque.clone());
@@ -456,10 +478,7 @@ async fn test_outbound_ipv6() {
 #[tokio::test]
 async fn test_keepalive_on_key_add() {
     let (_, tun_writer, _, _) = dummy_tun::create_pair();
-    let router: TestRouter = DeviceHandle::new(1, tun_writer);
-
-    let (_, udp_writer, _, _, _, _) = dummy_udp::create_pair();
-    router.set_outbound_writer(udp_writer);
+    let router = make_test_router_no_outbound(tun_writer);
 
     let opaque = Opaque::new();
     let peer = router.new_peer(opaque.clone());

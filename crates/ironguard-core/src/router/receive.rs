@@ -156,10 +156,8 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> Sequential
         let packet = &msg.1[header_size..];
         if let Some(inner) = inner_length(packet) {
             if inner + SIZE_TAG <= packet.len() {
-                let _ = super::device::block_on_io(
-                    &peer.device.rt_handle,
-                    peer.device.inbound.write(&packet[..inner]),
-                );
+                let buf = packet[..inner].to_vec();
+                let _ = peer.device.tun_write_tx.try_send(buf);
             }
         }
 

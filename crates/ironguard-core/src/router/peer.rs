@@ -218,22 +218,20 @@ pub fn new_peer<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>>
 
 impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> PeerInner<E, C, T, B> {
     /// Send a raw message to the peer (used for handshake messages).
+    /// Dispatches to the UDP write channel (non-blocking).
     pub fn send_raw(&self, msg: &[u8]) -> Result<(), RouterError> {
-        match self.endpoint.lock().as_mut() {
-            Some(endpoint) => {
-                let outbound = self.device.outbound.read();
-                if outbound.0 {
-                    outbound
-                        .1
-                        .as_ref()
-                        .ok_or(RouterError::SendError)
-                        .and_then(|w| {
-                            super::device::block_on_io(
-                                &self.device.rt_handle,
-                                w.write(msg, endpoint),
-                            )
-                            .map_err(|_| RouterError::SendError)
-                        })
+        match self.endpoint.lock().clone() {
+            Some(ep) => {
+                if *self.device.outbound_enabled.read()
+                    && self
+                        .device
+                        .outbound_ready
+                        .load(core::sync::atomic::Ordering::Acquire)
+                {
+                    self.device
+                        .udp_write_tx
+                        .try_send((msg.to_vec(), ep))
+                        .map_err(|_| RouterError::SendError)
                 } else {
                     Ok(())
                 }

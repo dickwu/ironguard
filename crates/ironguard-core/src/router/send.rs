@@ -131,7 +131,32 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> Sequential
 
         // Send from HEADER_OFFSET to end (header + ciphertext + tag)
         let wire_msg = &msg[HEADER_OFFSET..];
-        let xmit = job.peer.send_raw(wire_msg).is_ok();
+
+        // Dispatch to the UDP write channel (non-blocking).
+        // Look up the peer's endpoint and check if outbound is enabled.
+        let xmit = {
+            let endpoint = job.peer.endpoint.lock().clone();
+            match endpoint {
+                Some(ep) => {
+                    let enabled = *job.peer.device.outbound_enabled.read();
+                    let ready = job
+                        .peer
+                        .device
+                        .outbound_ready
+                        .load(core::sync::atomic::Ordering::Acquire);
+                    if enabled && ready {
+                        job.peer
+                            .device
+                            .udp_write_tx
+                            .try_send((wire_msg.to_vec(), ep))
+                            .is_ok()
+                    } else {
+                        false
+                    }
+                }
+                None => false,
+            }
+        };
 
         // Report the wire message size
         C::send(

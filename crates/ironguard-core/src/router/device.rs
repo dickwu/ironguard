@@ -1,11 +1,12 @@
 use std::collections::HashMap;
+use std::marker::PhantomData;
 use std::ops::Deref;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
 use spin::{Mutex, RwLock};
-use tokio::runtime::Handle;
+use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::constants::SIZE_MESSAGE_PREFIX;
 use crate::types::KeyPair;
@@ -23,23 +24,20 @@ use super::route::RoutingTable;
 use super::types::{Callbacks, RouterError};
 use super::worker::{JobUnion, worker};
 
-/// Block on an async IO future from either an async task or a plain OS thread.
-/// Uses `block_in_place` when called from within a Tokio runtime context
-/// (e.g. from an async handshake worker), or `block_on` when called from a
-/// plain OS thread (e.g. router crypto worker).
-pub(super) fn block_on_io<F: std::future::Future>(handle: &Handle, fut: F) -> F::Output {
-    match Handle::try_current() {
-        Ok(_) => tokio::task::block_in_place(|| handle.block_on(fut)),
-        Err(_) => handle.block_on(fut),
-    }
-}
-
 pub struct DeviceInner<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> {
-    // inbound writer (TUN)
-    pub(super) inbound: T,
+    // type markers (actual writers live in dedicated write worker tasks)
+    pub(super) _tun_writer: PhantomData<T>,
+    pub(super) _udp_writer: PhantomData<B>,
 
-    // outbound writer (Bind)
-    pub(super) outbound: RwLock<(bool, Option<B>)>,
+    // outbound state: enabled flag and "writer has been configured" flag
+    pub(super) outbound_enabled: RwLock<bool>,
+    pub(super) outbound_ready: AtomicBool,
+
+    // bounded channel for TUN writes (decrypted packets)
+    pub(super) tun_write_tx: tokio_mpsc::Sender<Vec<u8>>,
+
+    // bounded channel for UDP writes (encrypted packets + endpoint)
+    pub(super) udp_write_tx: tokio_mpsc::Sender<(Vec<u8>, E)>,
 
     // routing
     #[allow(clippy::type_complexity)]
@@ -48,9 +46,6 @@ pub struct DeviceInner<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWri
 
     // work queue
     pub(super) work: ParallelQueue<JobUnion<E, C, T, B>>,
-
-    // Tokio runtime handle for blocking on async IO from worker threads
-    pub(super) rt_handle: Handle,
 }
 
 pub struct EncryptionState {
@@ -117,22 +112,24 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> Drop
 }
 
 impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> DeviceHandle<E, C, T, B> {
-    pub fn new(num_workers: usize, tun: T) -> DeviceHandle<E, C, T, B> {
+    pub fn new(
+        num_workers: usize,
+        tun_write_tx: tokio_mpsc::Sender<Vec<u8>>,
+        udp_write_tx: tokio_mpsc::Sender<(Vec<u8>, E)>,
+    ) -> DeviceHandle<E, C, T, B> {
         let (work, mut consumers) = ParallelQueue::new(num_workers, PARALLEL_QUEUE_SIZE);
-
-        // Capture the current Tokio runtime handle so router worker threads
-        // can block on async IO calls. Callers must ensure a Tokio runtime
-        // context is active (e.g. via `runtime.enter()` or `#[tokio::test]`).
-        let rt_handle = Handle::current();
 
         let device = Device {
             inner: Arc::new(DeviceInner {
                 work,
-                inbound: tun,
-                outbound: RwLock::new((true, None)),
+                _tun_writer: PhantomData,
+                _udp_writer: PhantomData,
+                outbound_enabled: RwLock::new(true),
+                outbound_ready: AtomicBool::new(false),
+                tun_write_tx,
+                udp_write_tx,
                 recv: RwLock::new(HashMap::new()),
                 table: RoutingTable::new(),
-                rt_handle,
             }),
         };
 
@@ -150,24 +147,24 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> DeviceHand
     }
 
     pub fn send_raw(&self, msg: &[u8], dst: &mut E) -> Result<(), RouterError> {
-        let bind = self.state.outbound.read();
-        if bind.0 {
-            if let Some(bind) = bind.1.as_ref() {
-                let fut = bind.write(msg, dst);
-                return block_on_io(&self.state.rt_handle, fut).map_err(|_| RouterError::SendError);
-            }
+        if *self.state.outbound_enabled.read() && self.state.outbound_ready.load(Ordering::Acquire)
+        {
+            let _ = self
+                .state
+                .udp_write_tx
+                .try_send((msg.to_vec(), dst.clone()));
         }
         Ok(())
     }
 
     /// Brings the router down (prevents outbound transmission).
     pub fn down(&self) {
-        self.state.outbound.write().0 = false;
+        *self.state.outbound_enabled.write() = false;
     }
 
     /// Brings the router up (enables outbound transmission).
     pub fn up(&self) {
-        self.state.outbound.write().0 = true;
+        *self.state.outbound_enabled.write() = true;
     }
 
     /// Adds a new peer to the device.
@@ -227,8 +224,9 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> DeviceHand
         Ok(())
     }
 
-    /// Set outbound writer.
-    pub fn set_outbound_writer(&self, new: B) {
-        self.state.outbound.write().1 = Some(new);
+    /// Mark that an outbound writer has been configured.
+    /// The actual writer is owned by the UDP write worker task.
+    pub fn set_outbound_ready(&self) {
+        self.state.outbound_ready.store(true, Ordering::Release);
     }
 }

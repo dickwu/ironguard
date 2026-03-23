@@ -9,6 +9,7 @@ use parking_lot::Mutex;
 use spin::RwLock;
 use tokio::runtime::Runtime;
 use tokio::sync::Notify;
+use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::handshake;
 use crate::peer::PeerInner;
@@ -16,7 +17,9 @@ use crate::queue::ParallelQueue;
 use crate::router;
 use crate::timers::TIMERS_TICK;
 use crate::types::{PublicKey, StaticSecret};
-use crate::workers::{HandshakeJob, handshake_worker, tun_worker, udp_worker};
+use crate::workers::{
+    HandshakeJob, handshake_worker, tun_worker, tun_write_worker, udp_worker, udp_write_worker,
+};
 
 use ironguard_platform::tun;
 use ironguard_platform::udp;
@@ -60,6 +63,10 @@ pub struct WireGuardInner<T: tun::Tun, B: udp::Udp> {
         HashMap<[u8; 32], router::PeerHandle<B::Endpoint, PeerInner<T, B>, T::Writer, B::Writer>>,
     >,
 
+    // Receiver end of the UDP write channel, consumed when set_writer() is called.
+    #[allow(clippy::type_complexity)]
+    pub udp_write_rx: Mutex<Option<tokio_mpsc::Receiver<(Vec<u8>, B::Endpoint)>>>,
+
     // Tokio runtime — owned by the device, used for spawning async tasks
     pub runtime: Runtime,
 }
@@ -95,21 +102,28 @@ impl<T: tun::Tun, B: udp::Udp> WireGuard<T, B> {
     ///
     /// Spawns `num_cpus` handshake worker threads and router worker threads.
     /// Creates a Tokio runtime internally for async task management.
+    /// Bounded channel capacity for the TUN and UDP write workers.
+    const WRITE_CHANNEL_CAPACITY: usize = 256;
+
     pub fn new(writer: T::Writer) -> WireGuard<T, B> {
         let cpus = num_cpus::get();
 
-        // Create a Tokio runtime for the device first, so that
-        // DeviceHandle::new() can capture the runtime handle for its
-        // worker threads.
+        // Create a Tokio runtime for the device.
         let runtime = Runtime::new().expect("failed to create Tokio runtime");
         let _guard = runtime.enter();
 
         // handshake queue
         let (tx, mut rxs) = ParallelQueue::new(cpus, 128);
 
-        // crypto-key router
+        // Create bounded channels for decoupled I/O writes.
+        let (tun_write_tx, tun_write_rx) =
+            tokio_mpsc::channel::<Vec<u8>>(Self::WRITE_CHANNEL_CAPACITY);
+        let (udp_write_tx, udp_write_rx) =
+            tokio_mpsc::channel::<(Vec<u8>, B::Endpoint)>(Self::WRITE_CHANNEL_CAPACITY);
+
+        // crypto-key router — receives channel senders, never blocks on I/O
         let router: router::DeviceHandle<B::Endpoint, PeerInner<T, B>, T::Writer, B::Writer> =
-            router::DeviceHandle::new(cpus, writer);
+            router::DeviceHandle::new(cpus, tun_write_tx, udp_write_tx);
 
         let wg = WireGuard {
             inner: Arc::new(WireGuardInner {
@@ -123,9 +137,16 @@ impl<T: tun::Tun, B: udp::Udp> WireGuard<T, B> {
                 peers: RwLock::new(handshake::device::Device::new()),
                 queue: tx,
                 peer_handles: RwLock::new(HashMap::new()),
+                udp_write_rx: Mutex::new(Some(udp_write_rx)),
                 runtime,
             }),
         };
+
+        // Spawn TUN write worker — drains the channel and writes to TUN
+        wg.runtime.spawn(tun_write_worker(tun_write_rx, writer));
+
+        // NOTE: UDP write worker is spawned lazily via set_writer(),
+        // since the UDP writer is not available at device creation time.
 
         // start handshake workers as async tasks
         while let Some(rx) = rxs.pop() {
@@ -237,7 +258,13 @@ impl<T: tun::Tun, B: udp::Udp> WireGuard<T, B> {
     }
 
     pub fn set_writer(&self, writer: B::Writer) {
-        self.router.set_outbound_writer(writer);
+        // Spawn the UDP write worker with the channel receiver (consumed once).
+        if let Some(rx) = self.udp_write_rx.lock().take() {
+            self.runtime.spawn(udp_write_worker(rx, writer));
+        }
+
+        // Mark the outbound path as ready so crypto workers send to the channel.
+        self.router.set_outbound_ready();
     }
 
     pub fn add_tun_reader(&self, reader: T::Reader)
