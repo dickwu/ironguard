@@ -45,6 +45,8 @@ pub enum SessionError {
     ChallengeMismatch,
     #[error("epoch mismatch: expected {expected}, got {got}")]
     EpochMismatch { expected: u32, got: u32 },
+    #[error("QUIC datagram error: {0}")]
+    QuicDatagram(String),
 }
 
 // ---------------------------------------------------------------------------
