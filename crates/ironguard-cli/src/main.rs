@@ -743,7 +743,8 @@ async fn cmd_up_v2(interface: &str, config_path: &str, foreground: bool) -> Resu
     use std::time::Instant;
 
     use ironguard_core::session::manager::SessionManager;
-    use ironguard_core::session::quic::QuicSessionConfig;
+    use ironguard_core::session::quic::{QuicSessionConfig, make_test_server_config};
+    use ironguard_core::session::tasks::{PeerLookup, quic_accept_loop, rekey_timer_task};
     use ironguard_platform::endpoint::Endpoint;
     use ironguard_platform::macos::endpoint::MacosEndpoint;
     use ironguard_platform::macos::tun::MacosTun;
@@ -805,9 +806,12 @@ async fn cmd_up_v2(interface: &str, config_path: &str, foreground: bool) -> Resu
         cert_path: quic_cfg.cert_path.as_ref().map(std::path::PathBuf::from),
         key_path: quic_cfg.key_path.as_ref().map(std::path::PathBuf::from),
     };
-    let mut session_mgr = SessionManager::new(session_config);
+    let session_mgr = Arc::new(SessionManager::new(session_config));
 
     eprintln!("session manager created (bind={})", bind_addr);
+
+    // Build a peer lookup table for the accept loop.
+    let known_peers = Arc::new(PeerLookup::new());
 
     // 6. For each peer: connect via QUIC, get keys, add peer to device
     for (i, peer_cfg) in iface_cfg.peers.iter().enumerate() {
@@ -838,6 +842,9 @@ async fn cmd_up_v2(interface: &str, config_path: &str, foreground: bool) -> Resu
             let addr = resolve_endpoint(ep_str)?;
             handle.set_endpoint(MacosEndpoint::from_address(addr));
 
+            // Register peer in lookup table for the accept loop.
+            known_peers.add(addr, pk_bytes);
+
             let data_port = iface_cfg.listen_port.unwrap_or(0);
             let receiver_id: u32 = rand::random();
 
@@ -852,8 +859,6 @@ async fn cmd_up_v2(interface: &str, config_path: &str, foreground: bool) -> Resu
                     );
 
                     // Install the derived keys into the router as a KeyPair.
-                    // This connects the session's data-plane keys to the
-                    // router's encrypt/decrypt path.
                     let keypair = ironguard_core::KeyPair {
                         birth: Instant::now(),
                         initiator: true,
@@ -909,16 +914,52 @@ async fn cmd_up_v2(interface: &str, config_path: &str, foreground: bool) -> Resu
     let stop = Arc::new(AtomicBool::new(false));
     let _timer = wg.start_timer_task(stop.clone());
 
+    // 11. Spawn QUIC accept loop and rekey timer background tasks.
+    let shutdown = Arc::new(tokio::sync::Notify::new());
+
+    // Build a KeyInstaller that bridges session keys to the WireGuard router.
+    let wg_installer = Arc::new(WgKeyInstaller { wg: wg.clone() });
+
+    // Create a QUIC server endpoint for inbound connections.
+    let server_config = make_test_server_config();
+    let quic_endpoint = quinn::Endpoint::server(server_config, bind_addr)
+        .map_err(|e| anyhow!("failed to create QUIC server endpoint: {e}"))?;
+
+    let quic_listen_addr = quic_endpoint
+        .local_addr()
+        .map_err(|e| anyhow!("QUIC endpoint local_addr: {e}"))?;
+    eprintln!("QUIC accept loop listening on {quic_listen_addr}");
+
+    let _accept_handle = tokio::spawn(quic_accept_loop(
+        quic_endpoint,
+        session_mgr.clone(),
+        wg_installer.clone(),
+        known_peers,
+        actual_port,
+        stop.clone(),
+        shutdown.clone(),
+    ));
+
+    let _rekey_handle = tokio::spawn(rekey_timer_task(
+        session_mgr.clone(),
+        wg_installer,
+        stop.clone(),
+        shutdown.clone(),
+    ));
+
     write_pid_file(interface)?;
     eprintln!(
         "interface {interface} is up (mtu={mtu}, transport=quic-session, sessions={})",
         session_mgr.session_count()
     );
 
-    // 11. Wait for Ctrl+C or SIGTERM
+    // 12. Wait for Ctrl+C or SIGTERM
     tokio::signal::ctrl_c().await?;
 
+    // Signal background tasks to stop.
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    shutdown.notify_waiters();
+
     wg.down();
     remove_pid_file(interface);
     eprintln!("interface {interface} is down");
@@ -935,7 +976,8 @@ async fn cmd_up_v2(interface: &str, config_path: &str, foreground: bool) -> Resu
     use std::time::Instant;
 
     use ironguard_core::session::manager::SessionManager;
-    use ironguard_core::session::quic::QuicSessionConfig;
+    use ironguard_core::session::quic::{QuicSessionConfig, make_test_server_config};
+    use ironguard_core::session::tasks::{PeerLookup, quic_accept_loop, rekey_timer_task};
     use ironguard_platform::endpoint::Endpoint;
     use ironguard_platform::linux::endpoint::LinuxEndpoint;
     use ironguard_platform::linux::tun::LinuxTun;
@@ -997,9 +1039,12 @@ async fn cmd_up_v2(interface: &str, config_path: &str, foreground: bool) -> Resu
         cert_path: quic_cfg.cert_path.as_ref().map(std::path::PathBuf::from),
         key_path: quic_cfg.key_path.as_ref().map(std::path::PathBuf::from),
     };
-    let mut session_mgr = SessionManager::new(session_config);
+    let session_mgr = Arc::new(SessionManager::new(session_config));
 
     eprintln!("session manager created (bind={})", bind_addr);
+
+    // Build a peer lookup table for the accept loop.
+    let known_peers = Arc::new(PeerLookup::new());
 
     // 6. For each peer: connect via QUIC, get keys, add peer to device
     for (i, peer_cfg) in iface_cfg.peers.iter().enumerate() {
@@ -1025,6 +1070,9 @@ async fn cmd_up_v2(interface: &str, config_path: &str, foreground: bool) -> Resu
         if let Some(ep_str) = &peer_cfg.endpoint {
             let addr = resolve_endpoint(ep_str)?;
             handle.set_endpoint(LinuxEndpoint::from_address(addr));
+
+            // Register peer in lookup table for the accept loop.
+            known_peers.add(addr, pk_bytes);
 
             let data_port = iface_cfg.listen_port.unwrap_or(0);
             let receiver_id: u32 = rand::random();
@@ -1094,21 +1142,153 @@ async fn cmd_up_v2(interface: &str, config_path: &str, foreground: bool) -> Resu
     let stop = Arc::new(AtomicBool::new(false));
     let _timer = wg.start_timer_task(stop.clone());
 
+    // 11. Spawn QUIC accept loop and rekey timer background tasks.
+    let shutdown = Arc::new(tokio::sync::Notify::new());
+
+    let wg_installer = Arc::new(WgKeyInstaller { wg: wg.clone() });
+
+    let server_config = make_test_server_config();
+    let quic_endpoint = quinn::Endpoint::server(server_config, bind_addr)
+        .map_err(|e| anyhow!("failed to create QUIC server endpoint: {e}"))?;
+
+    let quic_listen_addr = quic_endpoint
+        .local_addr()
+        .map_err(|e| anyhow!("QUIC endpoint local_addr: {e}"))?;
+    eprintln!("QUIC accept loop listening on {quic_listen_addr}");
+
+    let _accept_handle = tokio::spawn(quic_accept_loop(
+        quic_endpoint,
+        session_mgr.clone(),
+        wg_installer.clone(),
+        known_peers,
+        actual_port,
+        stop.clone(),
+        shutdown.clone(),
+    ));
+
+    let _rekey_handle = tokio::spawn(rekey_timer_task(
+        session_mgr.clone(),
+        wg_installer,
+        stop.clone(),
+        shutdown.clone(),
+    ));
+
     write_pid_file(interface)?;
     eprintln!(
         "interface {interface} is up (mtu={mtu}, transport=quic-session, sessions={})",
         session_mgr.session_count()
     );
 
-    // 11. Wait for Ctrl+C or SIGTERM
+    // 12. Wait for Ctrl+C or SIGTERM
     tokio::signal::ctrl_c().await?;
 
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    shutdown.notify_waiters();
+
     wg.down();
     remove_pid_file(interface);
     eprintln!("interface {interface} is down");
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// WgKeyInstaller — bridges SessionManager keys to the WireGuard router
+// ---------------------------------------------------------------------------
+
+/// Installs session-derived keypairs into the WireGuard device's router.
+///
+/// Implements `KeyInstaller` from `ironguard_core::session::tasks` so that
+/// the accept loop and rekey timer can push new keys without knowing the
+/// concrete platform types.
+#[cfg(all(target_os = "macos", feature = "quic"))]
+struct WgKeyInstaller {
+    wg: ironguard_core::device::WireGuard<
+        ironguard_platform::macos::tun::MacosTun,
+        ironguard_platform::macos::udp::MacosUdp,
+    >,
+}
+
+#[cfg(all(target_os = "macos", feature = "quic"))]
+impl ironguard_core::session::tasks::KeyInstaller for WgKeyInstaller {
+    fn install_keypair(
+        &self,
+        peer_pk: &[u8; 32],
+        session: &ironguard_core::session::manager::SessionResult,
+        initiator: bool,
+    ) {
+        let pk = ironguard_core::PublicKey::from_bytes(*peer_pk);
+        if let Some(handle) = self.wg.get_peer_handle(&pk) {
+            let keypair = ironguard_core::KeyPair {
+                birth: std::time::Instant::now(),
+                initiator,
+                send: ironguard_core::Key {
+                    key: session.keys.send_key,
+                    id: session.receiver_id,
+                },
+                recv: ironguard_core::Key {
+                    key: session.keys.recv_key,
+                    id: rand::random(),
+                },
+            };
+            handle.add_keypair(keypair);
+            tracing::info!(
+                peer = hex::encode(peer_pk),
+                epoch = session.epoch,
+                "installed keypair into router"
+            );
+        } else {
+            tracing::warn!(
+                peer = hex::encode(peer_pk),
+                "cannot install keypair: peer not found in device"
+            );
+        }
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "quic"))]
+struct WgKeyInstaller {
+    wg: ironguard_core::device::WireGuard<
+        ironguard_platform::linux::tun::LinuxTun,
+        ironguard_platform::linux::udp::LinuxUdp,
+    >,
+}
+
+#[cfg(all(target_os = "linux", feature = "quic"))]
+impl ironguard_core::session::tasks::KeyInstaller for WgKeyInstaller {
+    fn install_keypair(
+        &self,
+        peer_pk: &[u8; 32],
+        session: &ironguard_core::session::manager::SessionResult,
+        initiator: bool,
+    ) {
+        let pk = ironguard_core::PublicKey::from_bytes(*peer_pk);
+        if let Some(handle) = self.wg.get_peer_handle(&pk) {
+            let keypair = ironguard_core::KeyPair {
+                birth: std::time::Instant::now(),
+                initiator,
+                send: ironguard_core::Key {
+                    key: session.keys.send_key,
+                    id: session.receiver_id,
+                },
+                recv: ironguard_core::Key {
+                    key: session.keys.recv_key,
+                    id: rand::random(),
+                },
+            };
+            handle.add_keypair(keypair);
+            tracing::info!(
+                peer = hex::encode(peer_pk),
+                epoch = session.epoch,
+                "installed keypair into router"
+            );
+        } else {
+            tracing::warn!(
+                peer = hex::encode(peer_pk),
+                "cannot install keypair: peer not found in device"
+            );
+        }
+    }
 }
 
 /// Fallback for unsupported platforms.

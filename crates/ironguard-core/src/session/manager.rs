@@ -4,11 +4,15 @@
 //! `PeerSession`s. It drives the QUIC handshake, data-plane key exchange, and
 //! epoch-based rekeying.
 //!
+//! Uses interior mutability (`parking_lot::Mutex`) so the manager can be
+//! shared via `Arc<SessionManager>` across background tasks (accept loop,
+//! rekey timer).
+//!
 //! Gated behind `feature = "quic"`.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::time::Instant;
 
 use parking_lot::Mutex;
 
@@ -30,10 +34,22 @@ pub struct PeerSession {
     pub epoch: u32,
     /// Our receiver ID advertised to this peer.
     pub receiver_id: u32,
+    /// When this session was established or last rekeyed.
+    pub established_at: Instant,
     /// The TLS exporter secret, retained for epoch-based rekeying.
     exporter_secret: [u8; 64],
     /// Our role in the session (client or server).
     role: Role,
+}
+
+// ---------------------------------------------------------------------------
+// Interior state
+// ---------------------------------------------------------------------------
+
+/// The mutable interior of `SessionManager`, protected by a `Mutex`.
+struct ManagerInner {
+    state: SessionState,
+    sessions: HashMap<[u8; 32], PeerSession>,
 }
 
 // ---------------------------------------------------------------------------
@@ -43,11 +59,11 @@ pub struct PeerSession {
 /// Manages QUIC sessions for all peers on a device.
 ///
 /// Holds configuration, per-peer sessions, and the shared rekey/migration
-/// state machine.
+/// state machine. All mutable state is behind a `Mutex` so the manager
+/// can be shared via `Arc<SessionManager>`.
 pub struct SessionManager {
     config: QuicSessionConfig,
-    state: Arc<Mutex<SessionState>>,
-    sessions: HashMap<[u8; 32], PeerSession>,
+    inner: Mutex<ManagerInner>,
 }
 
 impl SessionManager {
@@ -55,8 +71,10 @@ impl SessionManager {
     pub fn new(config: QuicSessionConfig) -> Self {
         Self {
             config,
-            state: Arc::new(Mutex::new(SessionState::new())),
-            sessions: HashMap::new(),
+            inner: Mutex::new(ManagerInner {
+                state: SessionState::new(),
+                sessions: HashMap::new(),
+            }),
         }
     }
 
@@ -67,12 +85,34 @@ impl SessionManager {
 
     /// Return the number of active peer sessions.
     pub fn session_count(&self) -> usize {
-        self.sessions.len()
+        self.inner.lock().sessions.len()
     }
 
-    /// Look up a peer session by public key bytes.
-    pub fn get_session(&self, peer_pk: &[u8; 32]) -> Option<&PeerSession> {
-        self.sessions.get(peer_pk)
+    /// Look up a peer session by public key bytes and apply a closure.
+    ///
+    /// Returns `None` if no session exists for `peer_pk`.
+    pub fn with_session<F, R>(&self, peer_pk: &[u8; 32], f: F) -> Option<R>
+    where
+        F: FnOnce(&PeerSession) -> R,
+    {
+        let inner = self.inner.lock();
+        inner.sessions.get(peer_pk).map(f)
+    }
+
+    /// Return a snapshot of all peer public keys that have active sessions.
+    pub fn peer_keys(&self) -> Vec<[u8; 32]> {
+        let inner = self.inner.lock();
+        inner.sessions.keys().copied().collect()
+    }
+
+    /// Return session info for a peer: (epoch, established_at, keys clone).
+    /// Used by the rekey timer to decide whether a rekey is needed.
+    pub fn session_info(&self, peer_pk: &[u8; 32]) -> Option<(u32, Instant, DataPlaneKeys)> {
+        let inner = self.inner.lock();
+        inner
+            .sessions
+            .get(peer_pk)
+            .map(|s| (s.epoch, s.established_at, s.keys.clone()))
     }
 
     // ── connect (client role) ────────────────────────────────────────────
@@ -83,15 +123,19 @@ impl SessionManager {
     /// `peer_pk` is the 32-byte public key used to index the session.
     /// `data_port` is the UDP port we will use for the raw data plane.
     /// `receiver_id` is our local receiver ID to advertise.
+    ///
+    /// Returns the session keys, epoch, and receiver_id on success.
     pub async fn connect(
-        &mut self,
+        &self,
         peer_pk: [u8; 32],
         peer_addr: SocketAddr,
         data_port: u16,
         receiver_id: u32,
-    ) -> Result<&PeerSession, SessionError> {
+    ) -> Result<SessionResult, SessionError> {
+        let bind_addr = self.config.bind_addr;
+
         // Build a client endpoint bound to the configured address.
-        let mut endpoint = quinn::Endpoint::client(self.config.bind_addr)
+        let mut endpoint = quinn::Endpoint::client(bind_addr)
             .map_err(|e| SessionError::QuicDatagram(format!("bind client: {e}")))?;
 
         endpoint.set_default_client_config(make_test_client_config());
@@ -113,17 +157,24 @@ impl SessionManager {
             .export_keying_material(&mut exporter_secret, b"EXPORTER-ironguard-data-plane", &[])
             .map_err(|_| SessionError::InvalidState)?;
 
+        let result = SessionResult {
+            keys: keys.clone(),
+            epoch: 0,
+            receiver_id,
+        };
+
         let session = PeerSession {
             connection,
             keys,
             epoch: 0,
             receiver_id,
+            established_at: Instant::now(),
             exporter_secret,
             role: Role::Client,
         };
 
-        self.sessions.insert(peer_pk, session);
-        Ok(self.sessions.get(&peer_pk).unwrap())
+        self.inner.lock().sessions.insert(peer_pk, session);
+        Ok(result)
     }
 
     // ── accept (server role) ─────────────────────────────────────────────
@@ -134,13 +185,15 @@ impl SessionManager {
     /// `peer_pk` is the 32-byte public key used to index the session.
     /// `data_port` is the UDP port we will use for the raw data plane.
     /// `receiver_id` is our local receiver ID to advertise.
+    ///
+    /// Returns the session keys, epoch, and receiver_id on success.
     pub async fn accept(
-        &mut self,
+        &self,
         peer_pk: [u8; 32],
         connection: quinn::Connection,
         data_port: u16,
         receiver_id: u32,
-    ) -> Result<&PeerSession, SessionError> {
+    ) -> Result<SessionResult, SessionError> {
         let (keys, _peer_init) =
             exchange_data_plane_keys(&connection, Role::Server, data_port, receiver_id).await?;
 
@@ -150,17 +203,24 @@ impl SessionManager {
             .export_keying_material(&mut exporter_secret, b"EXPORTER-ironguard-data-plane", &[])
             .map_err(|_| SessionError::InvalidState)?;
 
+        let result = SessionResult {
+            keys: keys.clone(),
+            epoch: 0,
+            receiver_id,
+        };
+
         let session = PeerSession {
             connection,
             keys,
             epoch: 0,
             receiver_id,
+            established_at: Instant::now(),
             exporter_secret,
             role: Role::Server,
         };
 
-        self.sessions.insert(peer_pk, session);
-        Ok(self.sessions.get(&peer_pk).unwrap())
+        self.inner.lock().sessions.insert(peer_pk, session);
+        Ok(result)
     }
 
     // ── rekey ────────────────────────────────────────────────────────────
@@ -171,22 +231,30 @@ impl SessionManager {
     /// 1. Initiator generates entropy and sends `RekeyInit` via QUIC datagram.
     /// 2. Responder replies with `RekeyAck` containing its own entropy.
     /// 3. Both sides derive new keys from the TLS exporter + epoch + entropy.
-    pub async fn rekey(&mut self, peer_pk: &[u8; 32]) -> Result<(), SessionError> {
-        let session = self
-            .sessions
-            .get(peer_pk)
-            .ok_or(SessionError::InvalidState)?;
-
-        let exporter_secret = session.exporter_secret;
-        let role = session.role;
+    ///
+    /// Returns the new session keys, epoch, and receiver_id on success.
+    pub async fn rekey(&self, peer_pk: &[u8; 32]) -> Result<SessionResult, SessionError> {
+        // Extract what we need from the session under the lock, then release.
+        let (exporter_secret, role, connection) = {
+            let inner = self.inner.lock();
+            let session = inner
+                .sessions
+                .get(peer_pk)
+                .ok_or(SessionError::InvalidState)?;
+            (
+                session.exporter_secret,
+                session.role,
+                session.connection.clone(),
+            )
+        };
 
         // Drive the state machine.
         let our_entropy: [u8; 32] = rand::random();
         let our_receiver_id: u32 = rand::random();
 
         let init_msg = {
-            let mut state = self.state.lock();
-            state.initiate_rekey(our_entropy, our_receiver_id)
+            let mut inner = self.inner.lock();
+            inner.state.initiate_rekey(our_entropy, our_receiver_id)
         };
 
         // Serialize and send the rekey init as a QUIC datagram.
@@ -196,14 +264,12 @@ impl SessionManager {
             hex::encode(init_msg.fresh_entropy),
             init_msg.new_receiver_id
         );
-        session
-            .connection
+        connection
             .send_datagram(init_bytes.into_bytes().into())
             .map_err(|e| SessionError::QuicDatagram(format!("send rekey init: {e}")))?;
 
         // Read the responder's ack datagram.
-        let ack_bytes = session
-            .connection
+        let ack_bytes = connection
             .read_datagram()
             .await
             .map_err(|e| SessionError::QuicDatagram(format!("read rekey ack: {e}")))?;
@@ -238,8 +304,8 @@ impl SessionManager {
         };
 
         let (epoch, initiator_entropy, resp_entropy) = {
-            let mut state = self.state.lock();
-            state.handle_rekey_ack(&ack)?
+            let mut inner = self.inner.lock();
+            inner.state.handle_rekey_ack(&ack)?
         };
 
         // Derive new data-plane keys for this epoch.
@@ -251,22 +317,44 @@ impl SessionManager {
             role,
         );
 
-        // Update the session in place.
-        let session = self
-            .sessions
-            .get_mut(peer_pk)
-            .ok_or(SessionError::InvalidState)?;
-        session.keys = new_keys;
-        session.epoch = epoch;
-        session.receiver_id = new_receiver_id;
+        let result = SessionResult {
+            keys: new_keys.clone(),
+            epoch,
+            receiver_id: new_receiver_id,
+        };
 
-        Ok(())
+        // Update the session in place.
+        {
+            let mut inner = self.inner.lock();
+            if let Some(session) = inner.sessions.get_mut(peer_pk) {
+                session.keys = new_keys;
+                session.epoch = epoch;
+                session.receiver_id = new_receiver_id;
+                session.established_at = Instant::now();
+            }
+        }
+
+        Ok(result)
     }
 
     /// Remove a peer session, closing the underlying QUIC connection.
-    pub fn remove_session(&mut self, peer_pk: &[u8; 32]) -> Option<PeerSession> {
-        self.sessions.remove(peer_pk)
+    pub fn remove_session(&self, peer_pk: &[u8; 32]) -> Option<PeerSession> {
+        self.inner.lock().sessions.remove(peer_pk)
     }
+}
+
+// ---------------------------------------------------------------------------
+// SessionResult — returned from connect/accept/rekey without borrowing
+// ---------------------------------------------------------------------------
+
+/// Snapshot of session state returned by `connect`, `accept`, and `rekey`.
+///
+/// Allows callers to read session data without holding the manager's lock.
+#[derive(Clone, Debug)]
+pub struct SessionResult {
+    pub keys: DataPlaneKeys,
+    pub epoch: u32,
+    pub receiver_id: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -275,6 +363,8 @@ impl SessionManager {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::super::quic::make_test_server_config;
     use super::*;
 
@@ -289,7 +379,7 @@ mod tests {
     fn test_session_manager_get_missing() {
         let config = QuicSessionConfig::default();
         let mgr = SessionManager::new(config);
-        assert!(mgr.get_session(&[0u8; 32]).is_none());
+        assert!(mgr.with_session(&[0u8; 32], |_| ()).is_none());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -310,7 +400,7 @@ mod tests {
             let connection = incoming.await.expect("incoming connection");
 
             let peer_pk = [0xAA; 32];
-            let mut server_mgr = SessionManager::new(QuicSessionConfig::default());
+            let server_mgr = SessionManager::new(QuicSessionConfig::default());
             let session = server_mgr
                 .accept(peer_pk, connection, 51821, 200)
                 .await
@@ -328,7 +418,7 @@ mod tests {
 
         // Client: connect via SessionManager.
         let peer_pk = [0xBB; 32];
-        let mut client_mgr = SessionManager::new(QuicSessionConfig::default());
+        let client_mgr = SessionManager::new(QuicSessionConfig::default());
 
         let session = client_mgr
             .connect(
@@ -374,6 +464,6 @@ mod tests {
 
         // Verify sessions are tracked.
         assert_eq!(client_mgr.session_count(), 1);
-        assert!(client_mgr.get_session(&peer_pk).is_some());
+        assert!(client_mgr.with_session(&peer_pk, |_| ()).is_some());
     }
 }
