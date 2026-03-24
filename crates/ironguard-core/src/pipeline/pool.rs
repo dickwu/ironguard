@@ -81,6 +81,88 @@ impl Drop for PacketGuard<'_> {
     }
 }
 
+/// Owns a buffer pool slot with `'static` lifetime. Implements `Deref`/`DerefMut`
+/// for `&[u8]`/`&mut [u8]` access. Returns the slot to the pool on drop.
+///
+/// Unlike `PacketGuard<'a>`, this type is `Send + Sync + 'static` because it
+/// holds an `Arc<BufferPool>` instead of a `&'a BufferPool` reference. This
+/// makes it safe to move through tokio channels and crossbeam queues.
+pub struct PoolVec {
+    pool: Arc<BufferPool>,
+    pub pool_idx: u16,
+    offset: usize,
+    len: usize,
+    capacity: usize,
+}
+
+impl PoolVec {
+    /// Allocate a small buffer from the pool.
+    pub fn alloc_small(pool: Arc<BufferPool>) -> Option<Self> {
+        let idx = pool.small_free.pop()?;
+        Some(Self {
+            pool,
+            pool_idx: idx,
+            offset: 0,
+            len: SMALL_BUF_SIZE,
+            capacity: SMALL_BUF_SIZE,
+        })
+    }
+
+    /// Allocate a large buffer from the pool.
+    pub fn alloc_large(pool: Arc<BufferPool>) -> Option<Self> {
+        let idx = pool.large_free.pop()?;
+        Some(Self {
+            pool,
+            pool_idx: idx,
+            offset: 0,
+            len: LARGE_BUF_SIZE,
+            capacity: LARGE_BUF_SIZE,
+        })
+    }
+
+    /// Set the valid data length (like `Vec::truncate`).
+    pub fn set_len(&mut self, len: usize) {
+        assert!(len <= self.capacity);
+        self.len = len;
+    }
+
+    /// Set the data offset (for prefix reservation).
+    pub fn set_offset(&mut self, offset: usize) {
+        assert!(offset < self.capacity);
+        self.offset = offset;
+    }
+}
+
+impl std::ops::Deref for PoolVec {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        let buf = self.pool.get(self.pool_idx);
+        &buf[self.offset..self.offset + self.len]
+    }
+}
+
+impl std::ops::DerefMut for PoolVec {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        // SAFETY: We own this pool index exclusively (popped from free list).
+        // No other PoolVec or PacketGuard can reference this slot.
+        unsafe {
+            let buf = self.pool.get_mut(self.pool_idx);
+            &mut buf[self.offset..self.offset + self.len]
+        }
+    }
+}
+
+impl Drop for PoolVec {
+    fn drop(&mut self) {
+        let idx = self.pool_idx as usize;
+        if idx < SMALL_POOL_SIZE {
+            let _ = self.pool.small_free.push(self.pool_idx);
+        } else {
+            let _ = self.pool.large_free.push(self.pool_idx);
+        }
+    }
+}
+
 /// Two-tier pre-allocated buffer pool.
 ///
 /// Buffers are allocated once at construction and never moved. The free lists
@@ -317,5 +399,61 @@ mod tests {
             data,
             "data read back should match what was written"
         );
+    }
+
+    #[test]
+    fn test_pool_vec_returns_slot_on_drop() {
+        let pool = Arc::new(BufferPool::new());
+
+        // Allocate a PoolVec
+        let pv = PoolVec::alloc_small(pool.clone()).expect("should succeed");
+
+        // Drop the PoolVec -- slot should return
+        drop(pv);
+
+        // Verify the slot is reusable by allocating again
+        let pv2 = PoolVec::alloc_small(pool.clone()).expect("should succeed after free");
+        drop(pv2);
+    }
+
+    #[test]
+    fn test_pool_vec_deref_read_write() {
+        let pool = Arc::new(BufferPool::new());
+        let mut pv = PoolVec::alloc_small(pool).expect("should succeed");
+
+        let data = b"test packet";
+        pv[..data.len()].copy_from_slice(data);
+        assert_eq!(&pv[..data.len()], data);
+    }
+
+    #[test]
+    fn test_pool_vec_is_send_sync_static() {
+        fn assert_bounds<T: Send + Sync + 'static>() {}
+        assert_bounds::<PoolVec>();
+    }
+
+    #[test]
+    fn test_pool_vec_set_len_and_offset() {
+        let pool = Arc::new(BufferPool::new());
+        let mut pv = PoolVec::alloc_small(pool).expect("should succeed");
+
+        // Default length is SMALL_BUF_SIZE
+        assert_eq!(pv.len(), SMALL_BUF_SIZE);
+
+        // Set a smaller length
+        pv.set_len(100);
+        assert_eq!(pv.len(), 100);
+
+        // Set an offset
+        pv.set_offset(10);
+        assert_eq!(pv.len(), 100);
+    }
+
+    #[test]
+    fn test_pool_vec_large_buffer() {
+        let pool = Arc::new(BufferPool::new());
+        let pv = PoolVec::alloc_large(pool).expect("should succeed");
+        assert!(pv.pool_idx as usize >= SMALL_POOL_SIZE);
+        assert_eq!(pv.len(), LARGE_BUF_SIZE);
     }
 }
