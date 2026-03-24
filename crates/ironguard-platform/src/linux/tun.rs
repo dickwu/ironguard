@@ -1,5 +1,5 @@
 use std::io;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::sync::Arc;
 
 use tokio::io::Interest;
@@ -35,17 +35,86 @@ impl AsRawFd for TunDevice {
     }
 }
 
+/// A duplicated file descriptor wrapped in an `OwnedFd`.
+///
+/// This newtype exists so we can register a dup'd fd with `AsyncFd`,
+/// which requires `AsRawFd`. The `OwnedFd` ensures the descriptor is
+/// closed on drop.
+struct DupFd {
+    fd: OwnedFd,
+}
+
+impl AsRawFd for DupFd {
+    fn as_raw_fd(&self) -> RawFd {
+        self.fd.as_raw_fd()
+    }
+}
+
+/// Duplicate a raw file descriptor via `libc::dup()` and set the result
+/// non-blocking. Returns an error if `dup()` fails or `fcntl` fails.
+fn dup_nonblocking(raw: RawFd) -> Result<DupFd, LinuxTunError> {
+    let new_fd = unsafe { libc::dup(raw) };
+    if new_fd == -1 {
+        return Err(LinuxTunError::Device(format!(
+            "dup() failed: {}",
+            io::Error::last_os_error()
+        )));
+    }
+
+    let owned = unsafe { OwnedFd::from_raw_fd(new_fd) };
+
+    let flags = unsafe { libc::fcntl(new_fd, libc::F_GETFL) };
+    if flags == -1 {
+        return Err(LinuxTunError::Device(format!(
+            "fcntl(F_GETFL) failed: {}",
+            io::Error::last_os_error()
+        )));
+    }
+    let rc = unsafe { libc::fcntl(new_fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    if rc == -1 {
+        return Err(LinuxTunError::Device(format!(
+            "fcntl(F_SETFL, O_NONBLOCK) failed: {}",
+            io::Error::last_os_error()
+        )));
+    }
+
+    Ok(DupFd { fd: owned })
+}
+
 pub struct LinuxTunWriter {
-    inner: Arc<AsyncFd<TunDevice>>,
+    /// Dup'd fd registered with WRITABLE-only interest, preventing
+    /// edge-triggered readiness contention with the reader.
+    inner: Arc<AsyncFd<DupFd>>,
+    /// Keep the original device alive so the underlying TUN interface is not
+    /// torn down while the writer is still in use.
+    _device: Arc<AsyncFd<TunDevice>>,
+    /// Whether the device was created with IFF_VNET_HDR (offload enabled).
+    offload_enabled: bool,
 }
 
 impl tun::Writer for LinuxTunWriter {
     type Error = LinuxTunError;
 
     async fn write(&self, src: &[u8]) -> Result<(), Self::Error> {
+        // Linux TUN with IFF_NO_PI: raw IP packets go directly without headers.
+        // We use libc::write() on the dup'd fd (same semantics as tun-rs send()
+        // on Linux, which is just fd.write(buf)).
         loop {
             let mut guard = self.inner.writable().await?;
-            match guard.try_io(|fd| fd.get_ref().device.send(src)) {
+            match guard.try_io(|fd| {
+                let n = unsafe {
+                    libc::write(
+                        fd.get_ref().as_raw_fd(),
+                        src.as_ptr() as *const libc::c_void,
+                        src.len(),
+                    )
+                };
+                if n < 0 {
+                    Err(io::Error::last_os_error())
+                } else {
+                    Ok(n as usize)
+                }
+            }) {
                 Ok(result) => {
                     result?;
                     return Ok(());
@@ -59,7 +128,7 @@ impl tun::Writer for LinuxTunWriter {
 impl LinuxTunWriter {
     /// Returns whether the underlying TUN device has GSO/GRO offload enabled.
     pub fn offload_enabled(&self) -> bool {
-        self.inner.get_ref().offload_enabled
+        self.offload_enabled
     }
 
     /// Write multiple packets in a single syscall via GSO (Generic Segmentation Offload).
@@ -89,8 +158,10 @@ impl LinuxTunWriter {
         bufs: &mut [B],
         offset: usize,
     ) -> Result<usize, LinuxTunError> {
+        // write_batch uses the original device fd via _device for
+        // tun-rs send_multiple() which needs the SyncDevice handle.
         loop {
-            let mut guard = self.inner.writable().await?;
+            let mut guard = self._device.writable().await?;
             match guard.try_io(|fd| fd.get_ref().device.send_multiple(gro_table, bufs, offset)) {
                 Ok(result) => return Ok(result?),
                 Err(_would_block) => continue,
@@ -315,25 +386,42 @@ impl LinuxTun {
             "created Linux TUN device"
         );
 
+        let raw_fd = device.as_raw_fd();
+
         let tun_device = TunDevice {
             device,
             offload_enabled: offload,
         };
-        let async_fd = Arc::new(
+
+        // Register the original fd with READABLE-only interest for readers.
+        let read_fd = Arc::new(
             AsyncFd::with_interest(tun_device, Interest::READABLE | Interest::WRITABLE)
-                .map_err(|e| LinuxTunError::Device(format!("AsyncFd creation failed: {e}")))?,
+                .map_err(|e| {
+                    LinuxTunError::Device(format!("AsyncFd creation (reader) failed: {e}"))
+                })?,
         );
+
+        // Duplicate the fd for the writer so read and write have independent
+        // epoll registrations, avoiding edge-triggered readiness contention.
+        // This is the same fix applied to macOS (utun) where the shared
+        // AsyncFd caused the reverse direction (server -> client) to block.
+        let dup_fd = dup_nonblocking(raw_fd)?;
+        let write_fd = Arc::new(AsyncFd::with_interest(dup_fd, Interest::WRITABLE).map_err(
+            |e| LinuxTunError::Device(format!("AsyncFd creation (writer) failed: {e}")),
+        )?);
 
         // Create `queue_count` readers sharing the same fd.
         // With true IFF_MULTI_QUEUE support, each would have its own fd.
         let readers: Vec<LinuxTunReader> = (0..queue_count)
             .map(|_| LinuxTunReader {
-                inner: Arc::clone(&async_fd),
+                inner: Arc::clone(&read_fd),
             })
             .collect();
 
         let writer = LinuxTunWriter {
-            inner: Arc::clone(&async_fd),
+            inner: write_fd,
+            _device: Arc::clone(&read_fd),
+            offload_enabled: offload,
         };
 
         // Status channel -- the CLI will send Up/Down events

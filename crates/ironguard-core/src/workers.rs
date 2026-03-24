@@ -177,11 +177,76 @@ pub async fn tun_worker<T: tun::Tun, B: udp::Udp>(wg: WireGuard<T, B>, reader: T
     tracing::info!("tun_worker exiting");
 }
 
+/// Dispatch a single received UDP message by type.
+///
+/// Handles legacy WireGuard handshake messages (types 1-3) and v2 frame
+/// types (DATA, KEEPALIVE, CONTROL, BATCH).
+fn dispatch_udp_message<T: tun::Tun, B: udp::Udp>(
+    wg: &WireGuard<T, B>,
+    msg: Vec<u8>,
+    src: B::Endpoint,
+) {
+    if msg.len() < std::mem::size_of::<u32>() {
+        debug!(len = msg.len(), "udp_worker: dropping undersized packet");
+        return;
+    }
+
+    // Demux incoming messages. Legacy WireGuard handshake messages use a
+    // u32 LE type field (values 1-3) while v2 data frames use a single-byte
+    // type at offset 0.  Because v2 TYPE_DATA (0x01) overlaps with
+    // TYPE_INITIATION when read as u32 LE, we check the legacy handshake
+    // types first and fall through to v2 dispatch for everything else.
+    let msg_type_u32 = u32::from_le_bytes(msg[..4].try_into().unwrap());
+    match msg_type_u32 {
+        #[cfg(feature = "legacy-wireguard")]
+        TYPE_COOKIE_REPLY | TYPE_INITIATION | TYPE_RESPONSE => {
+            wg.pending.fetch_add(1, Ordering::SeqCst);
+            wg.queue.send(HandshakeJob::Message(msg, src));
+        }
+        _ => {
+            // v2 frame dispatch on the first byte
+            if msg.len() < messages_v2::HEADER_SIZE {
+                debug!(len = msg.len(), "udp_worker: v2 frame too short");
+                return;
+            }
+            match msg[0] {
+                messages_v2::TYPE_DATA | messages_v2::TYPE_KEEPALIVE => {
+                    debug!(
+                        frame_type = msg[0],
+                        len = msg.len(),
+                        "udp_worker: dispatching v2 data/keepalive to router"
+                    );
+                    match wg.router.recv(src, msg) {
+                        Ok(()) => {}
+                        Err(e) => {
+                            debug!(error = ?e, "udp_worker: router.recv failed");
+                        }
+                    }
+                }
+                messages_v2::TYPE_CONTROL => {
+                    debug!(
+                        len = msg.len(),
+                        "received v2 control frame (payload_len={})",
+                        msg.len() - messages_v2::HEADER_SIZE
+                    );
+                }
+                messages_v2::TYPE_BATCH => {
+                    process_batch_frame(wg, &msg, &src);
+                }
+                _ => (),
+            }
+        }
+    }
+}
+
+/// Maximum number of datagrams to receive in a single batch call.
+const MAX_RECV_BATCH: usize = 64;
+
 /// UDP reader worker: reads encrypted messages from the UDP socket,
 /// demuxes by message type, and dispatches to handshake queue or router.
 ///
-/// Uses the device's `BufferPool` for allocation when possible, falling back
-/// to heap allocation for oversized packets or when the pool is exhausted.
+/// Uses batch receive when the platform supports it (recvmsg_x on macOS,
+/// recvmmsg on Linux), falling back to single-packet reads otherwise.
 ///
 /// Handles v2 frame types:
 /// - `TYPE_DATA` (0x04) and `TYPE_KEEPALIVE` (0x05): routed to the crypto router
@@ -196,73 +261,43 @@ pub async fn udp_worker<T: tun::Tun, B: udp::Udp>(wg: WireGuard<T, B>, reader: B
         // so the buffer is always large enough for handshake messages.
         let alloc_mtu = wg.mtu.load(Ordering::Relaxed);
         let size = alloc_mtu + MAX_HANDSHAKE_MSG_SIZE;
-        let mut msg = alloc_udp_buffer(&wg.pool, size);
 
-        let (n, src) = match reader.read(&mut msg).await {
+        // Query how many datagrams are queued so we can size the batch.
+        // Falls back to 1 on platforms that do not support the query.
+        let pending = reader.pending_recv_count().unwrap_or(1) as usize;
+        let batch_size = pending.clamp(1, MAX_RECV_BATCH);
+
+        // Allocate buffers for the batch.
+        let mut bufs: Vec<Vec<u8>> = (0..batch_size)
+            .map(|_| alloc_udp_buffer(&wg.pool, size))
+            .collect();
+
+        // Read a batch of datagrams. This waits for at least one packet
+        // (blocking), then reads up to batch_size packets if available.
+        let results = match reader.read_batch(&mut bufs, batch_size).await {
             Err(_) => return,
             Ok(v) => v,
         };
-        msg.truncate(n);
-
-        debug!(len = n, src = ?src.to_address(), "udp_worker: received packet");
 
         // Re-read MTU after the (potentially blocking) read returns.
         let mtu = wg.mtu.load(Ordering::Relaxed);
         if mtu == 0 {
-            debug!("udp_worker: dropping packet (mtu=0)");
+            debug!("udp_worker: dropping batch (mtu=0)");
             continue;
         }
 
-        if msg.len() < std::mem::size_of::<u32>() {
-            debug!(len = msg.len(), "udp_worker: dropping undersized packet");
-            continue;
+        let batch_len = results.len();
+        if batch_len > 1 {
+            debug!(count = batch_len, "udp_worker: received batch");
         }
 
-        // Demux incoming messages. Legacy WireGuard handshake messages use a
-        // u32 LE type field (values 1-3) while v2 data frames use a single-byte
-        // type at offset 0.  Because v2 TYPE_DATA (0x01) overlaps with
-        // TYPE_INITIATION when read as u32 LE, we check the legacy handshake
-        // types first and fall through to v2 dispatch for everything else.
-        let msg_type_u32 = u32::from_le_bytes(msg[..4].try_into().unwrap());
-        match msg_type_u32 {
-            #[cfg(feature = "legacy-wireguard")]
-            TYPE_COOKIE_REPLY | TYPE_INITIATION | TYPE_RESPONSE => {
-                wg.pending.fetch_add(1, Ordering::SeqCst);
-                wg.queue.send(HandshakeJob::Message(msg, src));
-            }
-            _ => {
-                // v2 frame dispatch on the first byte
-                if msg.len() < messages_v2::HEADER_SIZE {
-                    debug!(len = msg.len(), "udp_worker: v2 frame too short");
-                    continue;
-                }
-                match msg[0] {
-                    messages_v2::TYPE_DATA | messages_v2::TYPE_KEEPALIVE => {
-                        debug!(
-                            frame_type = msg[0],
-                            len = msg.len(),
-                            "udp_worker: dispatching v2 data/keepalive to router"
-                        );
-                        match wg.router.recv(src, msg) {
-                            Ok(()) => {}
-                            Err(e) => {
-                                debug!(error = ?e, "udp_worker: router.recv failed");
-                            }
-                        }
-                    }
-                    messages_v2::TYPE_CONTROL => {
-                        debug!(
-                            len = msg.len(),
-                            "received v2 control frame (payload_len={})",
-                            msg.len() - messages_v2::HEADER_SIZE
-                        );
-                    }
-                    messages_v2::TYPE_BATCH => {
-                        process_batch_frame(&wg, &msg, &src);
-                    }
-                    _ => (),
-                }
-            }
+        // Dispatch each received packet.
+        for (i, (n, src)) in results.into_iter().enumerate() {
+            let mut msg = std::mem::take(&mut bufs[i]);
+            msg.truncate(n);
+
+            debug!(len = n, src = ?src.to_address(), "udp_worker: received packet");
+            dispatch_udp_message(&wg, msg, src);
         }
     }
 }
@@ -384,30 +419,63 @@ pub async fn udp_write_worker<E: Endpoint, B: udp::UdpWriter<E>>(
             }
         }
 
-        // Flush the batch: write all collected packets to UDP.
+        // Flush the batch via batch send (uses sendmsg_x on macOS,
+        // sendmmsg on Linux, or falls back to individual writes).
         let batch_count = batch.len();
-        for (msg, mut endpoint) in batch.drain(..) {
-            let ep_addr = endpoint.to_address();
-            match writer.write(&msg, &mut endpoint).await {
-                Ok(()) => {
+
+        // Convert (Vec<u8>, E) pairs to (Vec<u8>, SocketAddr) for the
+        // batch write trait method.
+        let wire_msgs: Vec<(Vec<u8>, std::net::SocketAddr)> = batch
+            .drain(..)
+            .map(|(msg, ep)| (msg, ep.to_address()))
+            .collect();
+
+        match writer.write_batch(&wire_msgs).await {
+            Ok(sent) => {
+                tracing::debug!(
+                    sent = sent,
+                    total = batch_count,
+                    "udp_write_worker: flushed batch"
+                );
+
+                // Handle partial sends: retry unsent messages individually.
+                if sent < batch_count {
                     tracing::debug!(
-                        len = msg.len(),
-                        endpoint = ?ep_addr,
-                        "udp_write_worker: sent packet"
+                        remaining = batch_count - sent,
+                        "udp_write_worker: retrying unsent packets individually"
                     );
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        len = msg.len(),
-                        endpoint = ?ep_addr,
-                        error = %e,
-                        "udp_write_worker: write failed"
-                    );
+                    for (msg, addr) in wire_msgs[sent..].iter() {
+                        let mut ep = E::from_address(*addr);
+                        if let Err(e) = writer.write(msg, &mut ep).await {
+                            tracing::warn!(
+                                len = msg.len(),
+                                endpoint = ?addr,
+                                error = %e,
+                                "udp_write_worker: retry write failed"
+                            );
+                        }
+                    }
                 }
             }
-        }
-        if batch_count > 0 {
-            tracing::debug!(count = batch_count, "udp_write_worker: flushed batch");
+            Err(e) => {
+                tracing::warn!(
+                    count = batch_count,
+                    error = %e,
+                    "udp_write_worker: batch write failed, retrying individually"
+                );
+                // Fall back to individual writes on batch failure.
+                for (msg, addr) in wire_msgs.iter() {
+                    let mut ep = E::from_address(*addr);
+                    if let Err(e) = writer.write(msg, &mut ep).await {
+                        tracing::warn!(
+                            len = msg.len(),
+                            endpoint = ?addr,
+                            error = %e,
+                            "udp_write_worker: fallback write failed"
+                        );
+                    }
+                }
+            }
         }
         total_bytes = 0;
     }
