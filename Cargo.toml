@@ -4,6 +4,7 @@ members = [
     "crates/ironguard-core",
     "crates/ironguard-platform",
     "crates/ironguard-config",
+    "crates/ironguard-connect",
     "crates/ironguard-cli",
 ]
 
@@ -48,3 +49,4 @@ bytes = "1"
 quinn = "0.11"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rcgen = "0.13"
+stunclient = "0.4"
