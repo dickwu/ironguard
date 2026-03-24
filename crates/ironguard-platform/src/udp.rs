@@ -44,7 +44,7 @@ pub trait UdpReader<E: Endpoint>: Send + Sync {
 }
 
 pub trait UdpWriter<E: Endpoint>: Send + Sync + 'static {
-    type Error: Error;
+    type Error: Error + Send;
     fn write(
         &self,
         buf: &[u8],
