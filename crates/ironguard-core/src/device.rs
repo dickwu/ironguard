@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use parking_lot::Mutex;
 use spin::RwLock;
-use tokio::runtime::Runtime;
+use tokio::runtime::{Handle, Runtime};
 use tokio::sync::Notify;
 use tokio::sync::mpsc as tokio_mpsc;
 
@@ -76,8 +76,13 @@ pub struct WireGuardInner<T: tun::Tun, B: udp::Udp> {
     // v2 pipeline buffer pool for zero-allocation packet processing
     pub pool: Arc<BufferPool>,
 
-    // Tokio runtime — owned by the device, used for spawning async tasks
-    pub runtime: Runtime,
+    // Tokio handle for spawning async tasks.
+    pub handle: Handle,
+
+    // Owned Tokio runtime — present only when the device created its own
+    // runtime (via `new()`). When the caller supplies a `Handle` (via
+    // `new_with_handle()`), this is `None` and the caller's runtime is used.
+    _owned_runtime: Option<Runtime>,
 }
 
 /// Top-level WireGuard device handle.
@@ -111,15 +116,40 @@ impl<T: tun::Tun, B: udp::Udp> WireGuard<T, B> {
     ///
     /// Spawns `num_cpus` handshake worker threads and router worker threads.
     /// Creates a Tokio runtime internally for async task management.
+    ///
+    /// **Note:** prefer [`new_with_handle`] when a Tokio runtime already exists
+    /// (e.g. inside an `async fn` or `#[tokio::main]`).  Creating a second
+    /// runtime causes `AsyncFd`-based readers (macOS TUN/UDP) to hang because
+    /// the fd is registered with the outer reactor while the worker polls the
+    /// inner one.
     /// Bounded channel capacity for the TUN and UDP write workers.
     const WRITE_CHANNEL_CAPACITY: usize = 256;
 
     pub fn new(writer: T::Writer) -> WireGuard<T, B> {
-        let cpus = num_cpus::get();
-
-        // Create a Tokio runtime for the device.
         let runtime = Runtime::new().expect("failed to create Tokio runtime");
+        let handle = runtime.handle().clone();
         let _guard = runtime.enter();
+        Self::build(writer, handle, Some(runtime))
+    }
+
+    /// Create a new WireGuard device that spawns tasks on the provided
+    /// Tokio runtime handle.
+    ///
+    /// Use this when the caller already owns a Tokio runtime (e.g. from
+    /// `#[tokio::main]`).  All async I/O tasks (TUN reader/writer, UDP
+    /// reader/writer) will be spawned on the **same** reactor where the
+    /// `AsyncFd` objects were created, avoiding cross-runtime hangs.
+    pub fn new_with_handle(writer: T::Writer, handle: Handle) -> WireGuard<T, B> {
+        let _guard = handle.enter();
+        Self::build(writer, handle, None)
+    }
+
+    fn build(
+        writer: T::Writer,
+        handle: Handle,
+        owned_runtime: Option<Runtime>,
+    ) -> WireGuard<T, B> {
+        let cpus = num_cpus::get();
 
         // handshake queue
         #[allow(unused_mut)]
@@ -153,12 +183,13 @@ impl<T: tun::Tun, B: udp::Udp> WireGuard<T, B> {
                 peer_handles: RwLock::new(HashMap::new()),
                 udp_write_rx: Mutex::new(Some(udp_write_rx)),
                 pool,
-                runtime,
+                handle,
+                _owned_runtime: owned_runtime,
             }),
         };
 
         // Spawn TUN write worker — drains the channel and writes to TUN
-        wg.runtime.spawn(tun_write_worker(tun_write_rx, writer));
+        wg.handle.spawn(tun_write_worker(tun_write_rx, writer));
 
         // NOTE: UDP write worker is spawned lazily via set_writer(),
         // since the UDP writer is not available at device creation time.
@@ -167,7 +198,7 @@ impl<T: tun::Tun, B: udp::Udp> WireGuard<T, B> {
         #[cfg(feature = "legacy-wireguard")]
         while let Some(rx) = rxs.pop() {
             let wg2 = wg.clone();
-            wg.runtime.spawn(handshake_worker(wg2, rx));
+            wg.handle.spawn(handshake_worker(wg2, rx));
         }
         #[cfg(not(feature = "legacy-wireguard"))]
         drop(rxs);
@@ -278,13 +309,13 @@ impl<T: tun::Tun, B: udp::Udp> WireGuard<T, B> {
         B::Reader: udp::UdpReader<B::Endpoint>,
     {
         let wg = self.clone();
-        self.runtime.spawn(udp_worker(wg, reader));
+        self.handle.spawn(udp_worker(wg, reader));
     }
 
     pub fn set_writer(&self, writer: B::Writer) {
         // Spawn the UDP write worker with the channel receiver (consumed once).
         if let Some(rx) = self.udp_write_rx.lock().take() {
-            self.runtime.spawn(udp_write_worker(rx, writer));
+            self.handle.spawn(udp_write_worker(rx, writer));
         }
 
         // Mark the outbound path as ready so crypto workers send to the channel.
@@ -296,12 +327,24 @@ impl<T: tun::Tun, B: udp::Udp> WireGuard<T, B> {
         T::Reader: tun::Reader,
     {
         let wg = self.clone();
-        self.runtime.spawn(tun_worker(wg, reader));
+        self.handle.spawn(tun_worker(wg, reader));
     }
 
     /// Block until shutdown is signalled.
+    ///
+    /// When the device owns its runtime (created via `new()`), this blocks on
+    /// the runtime.  When using an external runtime (via `new_with_handle()`),
+    /// this uses `Handle::block_on`.
     pub fn wait(&self) {
-        self.runtime.block_on(self.shutdown.notified());
+        if let Some(rt) = &self._owned_runtime {
+            rt.block_on(self.shutdown.notified());
+        } else {
+            // External runtime — use handle.block_on which enters the runtime
+            // context for the blocking call.
+            tokio::task::block_in_place(|| {
+                self.handle.block_on(self.shutdown.notified());
+            });
+        }
     }
 
     // ── timer task ────────────────────────────────────────────────────────
@@ -314,7 +357,7 @@ impl<T: tun::Tun, B: udp::Udp> WireGuard<T, B> {
     /// Returns a `JoinHandle` for the spawned task.
     pub fn start_timer_task(&self, stop: Arc<AtomicBool>) -> tokio::task::JoinHandle<()> {
         let wg = self.clone();
-        self.runtime.spawn(async move {
+        self.handle.spawn(async move {
             let mut tick_duration = TIMERS_TICK;
             let mut interval = tokio::time::interval(tick_duration);
             loop {

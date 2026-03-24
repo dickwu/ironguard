@@ -138,6 +138,7 @@ mod tests {
                     persistent_keepalive: None,
                     comment: None,
                     pq_public_key: None,
+                    quic_port: None,
                 }],
             },
         );

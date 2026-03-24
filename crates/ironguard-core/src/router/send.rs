@@ -142,16 +142,32 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> Sequential
                         .outbound_ready
                         .load(core::sync::atomic::Ordering::Acquire);
                     if enabled && ready {
-                        job.peer
+                        let ep_addr = ep.to_address();
+                        let result = job.peer
                             .device
                             .udp_write_tx
-                            .try_send((wire_msg.to_vec(), ep))
-                            .is_ok()
+                            .try_send((wire_msg.to_vec(), ep));
+                        tracing::debug!(
+                            wire_len = wire_msg.len(),
+                            endpoint = ?ep_addr,
+                            sent = result.is_ok(),
+                            counter = job.counter,
+                            "send_job: dispatched to UDP write channel"
+                        );
+                        result.is_ok()
                     } else {
+                        tracing::debug!(
+                            enabled = enabled,
+                            ready = ready,
+                            "send_job: outbound not enabled/ready"
+                        );
                         false
                     }
                 }
-                None => false,
+                None => {
+                    tracing::debug!("send_job: no endpoint set for peer");
+                    false
+                }
             }
         };
 

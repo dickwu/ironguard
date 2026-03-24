@@ -272,6 +272,7 @@ mod tests {
             persistent_keepalive: None,
             comment: None,
             pq_public_key: None,
+            quic_port: None,
         };
 
         let loaded = load_preshared_key(&peer).unwrap();
@@ -288,6 +289,7 @@ mod tests {
             persistent_keepalive: None,
             comment: None,
             pq_public_key: None,
+            quic_port: None,
         };
 
         assert_eq!(load_preshared_key(&peer).unwrap(), None);

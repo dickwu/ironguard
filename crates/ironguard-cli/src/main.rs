@@ -210,7 +210,10 @@ async fn cmd_up(interface: &str, config_path: &str, foreground: bool) -> Result<
 
     // 4. Create WireGuard device (raw UDP path)
     type Wg = ironguard_core::device::WireGuard<MacosTun, MacosUdp>;
-    let wg: Wg = ironguard_core::device::WireGuard::new(tun_writer);
+    let wg: Wg = ironguard_core::device::WireGuard::new_with_handle(
+        tun_writer,
+        tokio::runtime::Handle::current(),
+    );
 
     // 5. Set private key
     let sk = ironguard_core::StaticSecret::from_bytes(sk_bytes);
@@ -358,7 +361,10 @@ async fn cmd_up_quic(
 
     // Create WireGuard device parameterized over QUIC.
     type WgQuic = ironguard_core::device::WireGuard<MacosTun, QuicUdp>;
-    let wg: WgQuic = ironguard_core::device::WireGuard::new(tun_writer);
+    let wg: WgQuic = ironguard_core::device::WireGuard::new_with_handle(
+        tun_writer,
+        tokio::runtime::Handle::current(),
+    );
 
     // Set private key.
     let sk = ironguard_core::StaticSecret::from_bytes(sk_bytes);
@@ -781,8 +787,16 @@ async fn cmd_up_v2(interface: &str, config_path: &str, foreground: bool) -> Resu
         MacosTun::create(interface).map_err(|e| anyhow!("failed to create TUN device: {e}"))?;
 
     // 4. Create WireGuard device (raw UDP data plane)
+    //
+    // Use the caller's runtime handle so that all async I/O tasks (TUN
+    // reader/writer, UDP reader/writer) share the same Tokio reactor where
+    // the AsyncFd objects were created.  Creating a second runtime would
+    // cause those tasks to hang on macOS.
     type Wg = ironguard_core::device::WireGuard<MacosTun, MacosUdp>;
-    let wg: Wg = ironguard_core::device::WireGuard::new(tun_writer);
+    let wg: Wg = ironguard_core::device::WireGuard::new_with_handle(
+        tun_writer,
+        tokio::runtime::Handle::current(),
+    );
 
     // Set private key on the device so legacy handshake fallback works.
     let sk = ironguard_core::StaticSecret::from_bytes(sk_bytes);
@@ -1029,8 +1043,14 @@ async fn cmd_up_v2(interface: &str, config_path: &str, foreground: bool) -> Resu
         LinuxTun::create(interface).map_err(|e| anyhow!("failed to create TUN device: {e}"))?;
 
     // 4. Create WireGuard device (raw UDP data plane)
+    //
+    // Use the caller's runtime handle so that all async I/O tasks share the
+    // same Tokio reactor where the AsyncFd objects were created.
     type Wg = ironguard_core::device::WireGuard<LinuxTun, LinuxUdp>;
-    let wg: Wg = ironguard_core::device::WireGuard::new(tun_writer);
+    let wg: Wg = ironguard_core::device::WireGuard::new_with_handle(
+        tun_writer,
+        tokio::runtime::Handle::current(),
+    );
 
     // Set private key on the device so legacy handshake fallback works.
     let sk = ironguard_core::StaticSecret::from_bytes(sk_bytes);

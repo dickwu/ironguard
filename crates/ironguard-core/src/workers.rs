@@ -157,6 +157,7 @@ fn process_batch_frame<T: tun::Tun, B: udp::Udp>(
 ///
 /// Runs as a Tokio task. The reader.read() call is async.
 pub async fn tun_worker<T: tun::Tun, B: udp::Udp>(wg: WireGuard<T, B>, reader: T::Reader) {
+    tracing::info!("tun_worker started, waiting for packets");
     loop {
         // Use a minimum buffer size of 1500 to avoid undersized allocations
         // when the device MTU is temporarily 0 (not yet up).
@@ -166,11 +167,15 @@ pub async fn tun_worker<T: tun::Tun, B: udp::Udp>(wg: WireGuard<T, B>, reader: T
 
         let payload = match reader.read(&mut msg[..], SIZE_MESSAGE_PREFIX).await {
             Ok(payload) => payload,
-            Err(_) => break,
+            Err(e) => {
+                tracing::warn!(error = %e, "tun_worker: read error, exiting");
+                break;
+            }
         };
 
         // Re-read MTU after the (potentially blocking) read returns.
         let mtu = wg.mtu.load(Ordering::Relaxed);
+        debug!(payload_len = payload, mtu = mtu, "tun_worker: read packet from TUN");
         if mtu == 0 {
             continue;
         }
@@ -178,8 +183,16 @@ pub async fn tun_worker<T: tun::Tun, B: udp::Udp>(wg: WireGuard<T, B>, reader: T
         let padded = padding(payload, mtu);
         msg.truncate(SIZE_MESSAGE_PREFIX + padded);
 
-        let _ = wg.router.send(msg);
+        match wg.router.send(msg) {
+            Ok(()) => {
+                debug!(padded_len = padded, "tun_worker: routed packet to peer");
+            }
+            Err(e) => {
+                debug!(error = ?e, "tun_worker: router.send failed");
+            }
+        }
     }
+    tracing::info!("tun_worker exiting");
 }
 
 /// UDP reader worker: reads encrypted messages from the UDP socket,
@@ -195,6 +208,7 @@ pub async fn tun_worker<T: tun::Tun, B: udp::Udp>(wg: WireGuard<T, B>, reader: T
 ///
 /// Runs as a Tokio task. The reader.read() call is async.
 pub async fn udp_worker<T: tun::Tun, B: udp::Udp>(wg: WireGuard<T, B>, reader: B::Reader) {
+    tracing::info!("udp_worker started, waiting for packets");
     loop {
         // Use current MTU for buffer sizing; add MAX_HANDSHAKE_MSG_SIZE
         // so the buffer is always large enough for handshake messages.
@@ -366,8 +380,29 @@ pub async fn udp_write_worker<E: Endpoint, B: udp::UdpWriter<E>>(
         }
 
         // Flush the batch: write all collected packets to UDP.
+        let batch_count = batch.len();
         for (msg, mut endpoint) in batch.drain(..) {
-            let _ = writer.write(&msg, &mut endpoint).await;
+            let ep_addr = endpoint.to_address();
+            match writer.write(&msg, &mut endpoint).await {
+                Ok(()) => {
+                    tracing::debug!(
+                        len = msg.len(),
+                        endpoint = ?ep_addr,
+                        "udp_write_worker: sent packet"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        len = msg.len(),
+                        endpoint = ?ep_addr,
+                        error = %e,
+                        "udp_write_worker: write failed"
+                    );
+                }
+            }
+        }
+        if batch_count > 0 {
+            tracing::debug!(count = batch_count, "udp_write_worker: flushed batch");
         }
         total_bytes = 0;
     }

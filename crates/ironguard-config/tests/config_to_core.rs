@@ -66,6 +66,7 @@ fn test_config_to_device_setup() {
                     persistent_keepalive: Some(25),
                     comment: Some("Peer A".to_string()),
                     pq_public_key: None,
+                    quic_port: None,
                 },
                 PeerConfig {
                     public_key: pk_b_hex.clone(),
@@ -75,6 +76,7 @@ fn test_config_to_device_setup() {
                     persistent_keepalive: None,
                     comment: None,
                     pq_public_key: None,
+                    quic_port: None,
                 },
             ],
         },
