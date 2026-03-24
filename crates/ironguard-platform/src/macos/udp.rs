@@ -37,21 +37,21 @@ impl udp::UdpWriter<MacosEndpoint> for MacosUdpWriter {
             return Ok(0);
         }
 
-        // Wait for the socket to be writable before attempting the batch.
-        self.socket.writable().await?;
+        // Wait for the socket to be writable, then call the batch syscall
+        // directly on the raw fd. On EWOULDBLOCK, retry after waiting again.
+        loop {
+            self.socket.writable().await?;
 
-        let fd = self.socket.as_raw_fd();
-        let batch_io = Arc::clone(&self.batch_io);
+            let batch_io = Arc::clone(&self.batch_io);
+            let fd = self.socket.as_raw_fd();
+            let msgs_owned: Vec<(Vec<u8>, SocketAddr)> = msgs.to_vec();
 
-        // DarwinBatchIo::send_batch is a synchronous FFI call. Clone the
-        // data into a Vec so it can be sent to a blocking thread safely.
-        let msgs_owned: Vec<(Vec<u8>, SocketAddr)> = msgs.to_vec();
-
-        let result = tokio::task::spawn_blocking(move || batch_io.send_batch(fd, &msgs_owned))
-            .await
-            .map_err(|e| MacosUdpError::Udp(format!("spawn_blocking join error: {e}")))?;
-
-        Ok(result?)
+            match batch_io.send_batch(fd, &msgs_owned) {
+                Ok(n) => return Ok(n),
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(e) => return Err(MacosUdpError::Io(e)),
+            }
+        }
     }
 }
 
@@ -79,36 +79,27 @@ impl udp::UdpReader<MacosEndpoint> for MacosUdpReader {
             return Ok(Vec::new());
         }
 
-        // Wait for the socket to be readable before attempting the batch.
-        self.socket.readable().await?;
+        // Wait for the socket to be readable, then call the batch syscall
+        // directly on the raw fd. On EWOULDBLOCK, retry after waiting again.
+        loop {
+            self.socket.readable().await?;
 
-        let fd = self.socket.as_raw_fd();
-        let batch_io = Arc::clone(&self.batch_io);
+            let batch_io = Arc::clone(&self.batch_io);
+            let fd = self.socket.as_raw_fd();
+            let batch_max = max.min(bufs.len());
 
-        // Convert the mutable slice into owned Vecs for the blocking task.
-        let mut owned_bufs: Vec<Vec<u8>> = bufs.to_vec();
-        let batch_max = max.min(owned_bufs.len());
-
-        let (result, returned_bufs) = tokio::task::spawn_blocking(move || {
-            let r = batch_io.recv_batch(fd, &mut owned_bufs, batch_max);
-            (r, owned_bufs)
-        })
-        .await
-        .map_err(|e| MacosUdpError::Udp(format!("spawn_blocking join error: {e}")))?;
-
-        // Copy the received data back into the caller's buffers.
-        for (i, buf) in returned_bufs.into_iter().enumerate() {
-            if i < bufs.len() {
-                bufs[i] = buf;
+            match batch_io.recv_batch(fd, bufs, batch_max) {
+                Ok(raw_results) => {
+                    let endpoints = raw_results
+                        .into_iter()
+                        .map(|(n, addr)| (n, MacosEndpoint::from_address(addr)))
+                        .collect::<Vec<_>>();
+                    return Ok(endpoints);
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(e) => return Err(MacosUdpError::Io(e)),
             }
         }
-
-        let raw_results = result?;
-        let endpoints = raw_results
-            .into_iter()
-            .map(|(n, addr)| (n, MacosEndpoint::from_address(addr)))
-            .collect();
-        Ok(endpoints)
     }
 
     /// Query the number of datagrams queued in the receive buffer via SO_NUMRCVPKT.
