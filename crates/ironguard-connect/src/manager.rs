@@ -1,15 +1,17 @@
 //! Connection manager for orchestrating candidate gathering.
 //!
 //! The `ConnectionManager` coordinates local interface discovery,
-//! STUN reflexive address discovery, and NAT type detection to
-//! produce a prioritized list of candidate addresses for reaching
-//! a peer.
+//! STUN reflexive address discovery, UPnP port mapping, and NAT
+//! type detection to produce a prioritized list of candidate
+//! addresses for reaching a peer.
 
 use std::net::{IpAddr, SocketAddr};
+use std::time::{Duration, Instant};
 
 use crate::candidate::{Candidate, CandidateKind};
 use crate::discovery::local::{InterfaceInfo, enumerate_interfaces};
 use crate::netcheck::NatType;
+use crate::portmap::PortMapper;
 use crate::stun;
 
 /// Configuration for the connection manager.
@@ -39,20 +41,80 @@ impl Default for ConnectionManagerConfig {
     }
 }
 
+/// Extended configuration for connection establishment.
+///
+/// Includes all settings for the full connectivity pipeline:
+/// STUN, UPnP, relay, mDNS, and hole punching.
+#[derive(Clone, Debug)]
+pub struct ConnectionConfig {
+    /// STUN servers for reflexive address discovery.
+    pub stun_servers: Vec<String>,
+
+    /// WireGuard listen port.
+    pub listen_port: u16,
+
+    /// Whether to include IPv6 link-local candidates.
+    pub include_link_local: bool,
+
+    /// Whether to attempt UPnP port mapping.
+    pub enable_upnp: bool,
+
+    /// Whether to enable mDNS LAN discovery.
+    pub enable_mdns: bool,
+
+    /// Relay server address for guaranteed fallback.
+    pub relay_addr: Option<SocketAddr>,
+}
+
+impl Default for ConnectionConfig {
+    fn default() -> Self {
+        Self {
+            stun_servers: stun::DEFAULT_STUN_SERVERS
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            listen_port: 51820,
+            include_link_local: true,
+            enable_upnp: true,
+            enable_mdns: true,
+            relay_addr: None,
+        }
+    }
+}
+
+/// Result of a successful connection attempt.
+///
+/// Represents the best path found to reach a peer, including
+/// the socket address, the type of candidate that succeeded,
+/// and the measured round-trip latency.
+#[derive(Clone, Debug)]
+pub struct ConnectedPath {
+    /// The socket address of the established path.
+    pub addr: SocketAddr,
+    /// What kind of candidate succeeded.
+    pub kind: CandidateKind,
+    /// Measured round-trip latency to the peer.
+    pub latency: Duration,
+}
+
 /// Orchestrates candidate gathering for peer connectivity.
 ///
 /// Combines local interface discovery, STUN reflexive address discovery,
-/// and link-local IPv6 to produce a prioritized list of candidates.
-/// Candidates are sorted by priority (highest first) so that direct
-/// LAN paths are tried before NAT-traversed or relayed paths.
+/// UPnP port mapping, and link-local IPv6 to produce a prioritized list
+/// of candidates. Candidates are sorted by priority (highest first) so
+/// that direct LAN paths are tried before NAT-traversed or relayed paths.
 pub struct ConnectionManager {
     config: ConnectionManagerConfig,
+    port_mapper: PortMapper,
 }
 
 impl ConnectionManager {
     /// Creates a new connection manager with the given configuration.
     pub fn new(config: ConnectionManagerConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            port_mapper: PortMapper::new(),
+        }
     }
 
     /// Creates a new connection manager with default configuration.
@@ -71,6 +133,7 @@ impl ConnectionManager {
     /// 1. Enumerate local physical interfaces -> Host candidates
     /// 2. Collect IPv6 link-local addresses -> LinkLocal candidates
     /// 3. Query STUN servers -> ServerReflexive candidate
+    /// 4. Attempt UPnP port mapping -> PortMapped candidate
     ///
     /// Results are sorted by priority (highest first):
     /// Host (1000) > PortMapped (800) > ServerReflexive (500) > LinkLocal (400) > Relay (100)
@@ -100,11 +163,21 @@ impl ConnectionManager {
             }
         }
 
+        // 4. UPnP port-mapped candidates
+        match self.gather_upnp_candidates().await {
+            Ok(upnp_candidates) => candidates.extend(upnp_candidates),
+            Err(e) => {
+                tracing::debug!(
+                    "UPnP port mapping unavailable (non-critical): {e}"
+                );
+            }
+        }
+
         // Sort by priority (highest first)
         candidates.sort_by(|a, b| b.priority.cmp(&a.priority));
 
         tracing::info!(
-            "gathered {} candidates: {} host, {} link-local, {} reflexive",
+            "gathered {} candidates: {} host, {} link-local, {} reflexive, {} port-mapped",
             candidates.len(),
             candidates
                 .iter()
@@ -118,9 +191,75 @@ impl ConnectionManager {
                 .iter()
                 .filter(|c| c.kind == CandidateKind::ServerReflexive)
                 .count(),
+            candidates
+                .iter()
+                .filter(|c| c.kind == CandidateKind::PortMapped)
+                .count(),
         );
 
         candidates
+    }
+
+    /// Tries to connect to a peer by probing candidates in priority order.
+    ///
+    /// Sends a UDP probe to each candidate address and waits for a
+    /// response. Returns the first candidate that responds, along
+    /// with the measured latency.
+    ///
+    /// # Arguments
+    ///
+    /// * `peer_candidates` - The peer's candidate addresses, sorted by priority.
+    pub async fn try_connect(
+        &self,
+        peer_candidates: &[Candidate],
+    ) -> Result<ConnectedPath, TryConnectError> {
+        if peer_candidates.is_empty() {
+            return Err(TryConnectError::NoCandidates);
+        }
+
+        let timeout = Duration::from_secs(5);
+
+        for candidate in peer_candidates {
+            tracing::debug!(
+                "probing {:?} candidate at {}",
+                candidate.kind,
+                candidate.addr
+            );
+
+            let start = Instant::now();
+            match probe_candidate(candidate.addr, timeout).await {
+                Ok(()) => {
+                    let latency = start.elapsed();
+                    tracing::info!(
+                        "connected via {:?} candidate at {} (latency {:?})",
+                        candidate.kind,
+                        candidate.addr,
+                        latency
+                    );
+                    return Ok(ConnectedPath {
+                        addr: candidate.addr,
+                        kind: candidate.kind.clone(),
+                        latency,
+                    });
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        "{:?} candidate {} failed: {e}",
+                        candidate.kind,
+                        candidate.addr
+                    );
+                }
+            }
+        }
+
+        Err(TryConnectError::AllCandidatesFailed(
+            peer_candidates.len(),
+        ))
+    }
+
+    /// Cleans up UPnP port mappings on shutdown.
+    pub async fn cleanup(&self) {
+        self.port_mapper.remove_mapping().await;
     }
 
     /// Gathers host candidates from physical interfaces.
@@ -178,6 +317,22 @@ impl ConnectionManager {
         )])
     }
 
+    /// Attempts UPnP port mapping to get a PortMapped candidate.
+    async fn gather_upnp_candidates(
+        &self,
+    ) -> Result<Vec<Candidate>, crate::portmap::PortmapError> {
+        let external_addr = self
+            .port_mapper
+            .try_upnp_mapping(self.config.listen_port)
+            .await?;
+
+        Ok(vec![Candidate::new(
+            external_addr,
+            CandidateKind::PortMapped,
+            None,
+        )])
+    }
+
     /// Detects the NAT type by querying STUN servers.
     ///
     /// This is a convenience method that wraps `netcheck::detect_nat_type`.
@@ -207,6 +362,36 @@ impl ConnectionManager {
     }
 }
 
+/// Errors from `try_connect`.
+#[derive(Debug, thiserror::Error)]
+pub enum TryConnectError {
+    /// No candidates were provided.
+    #[error("no candidates to try")]
+    NoCandidates,
+
+    /// All candidates failed to respond.
+    #[error("all {0} candidates failed")]
+    AllCandidatesFailed(usize),
+}
+
+/// Probes a single candidate address with a UDP round-trip.
+async fn probe_candidate(
+    addr: SocketAddr,
+    timeout: Duration,
+) -> Result<(), std::io::Error> {
+    tokio::task::spawn_blocking(move || {
+        let sock = std::net::UdpSocket::bind("0.0.0.0:0")?;
+        sock.set_read_timeout(Some(timeout))?;
+        sock.send_to(b"IGPROBE", addr)?;
+
+        let mut buf = [0u8; 64];
+        sock.recv_from(&mut buf)?;
+        Ok(())
+    })
+    .await
+    .map_err(std::io::Error::other)?
+}
+
 /// Checks if an IPv6 address is link-local (fe80::/10).
 fn is_link_local_v6(addr: &std::net::Ipv6Addr) -> bool {
     let segments = addr.segments();
@@ -224,6 +409,27 @@ mod tests {
         assert_eq!(config.listen_port, 51820);
         assert!(config.include_link_local);
         assert!(!config.stun_servers.is_empty());
+    }
+
+    #[test]
+    fn test_connection_config_defaults() {
+        let config = ConnectionConfig::default();
+        assert_eq!(config.listen_port, 51820);
+        assert!(config.enable_upnp);
+        assert!(config.enable_mdns);
+        assert!(config.relay_addr.is_none());
+    }
+
+    #[test]
+    fn test_connected_path() {
+        let path = ConnectedPath {
+            addr: "10.0.0.1:51820".parse().unwrap(),
+            kind: CandidateKind::Host,
+            latency: Duration::from_millis(5),
+        };
+        assert_eq!(path.addr.port(), 51820);
+        assert_eq!(path.kind, CandidateKind::Host);
+        assert!(path.latency < Duration::from_secs(1));
     }
 
     #[test]
@@ -390,5 +596,28 @@ mod tests {
                 "candidates should be sorted by priority descending"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_try_connect_no_candidates() {
+        let manager = ConnectionManager::with_defaults();
+        let result = manager.try_connect(&[]).await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            TryConnectError::NoCandidates
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_try_connect_unreachable() {
+        let manager = ConnectionManager::with_defaults();
+        let candidates = vec![Candidate::new(
+            "192.0.2.1:51820".parse().unwrap(),
+            CandidateKind::Host,
+            None,
+        )];
+        let result = manager.try_connect(&candidates).await;
+        assert!(result.is_err());
     }
 }
