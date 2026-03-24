@@ -5,12 +5,11 @@ use tokio::sync::mpsc;
 
 use crate::constants::{
     DURATION_UNDER_LOAD, MAX_QUEUED_INCOMING_HANDSHAKES, MESSAGE_PADDING_MULTIPLE,
-    SIZE_MESSAGE_PREFIX, THRESHOLD_UNDER_LOAD,
+    SIZE_MESSAGE_PREFIX, THRESHOLD_UNDER_LOAD, TYPE_COOKIE_REPLY, TYPE_INITIATION, TYPE_RESPONSE,
 };
 use crate::device::WireGuard;
-use crate::handshake::messages::{TYPE_COOKIE_REPLY, TYPE_INITIATION, TYPE_RESPONSE};
 use crate::pipeline::batch::{DEFAULT_BATCH_FLUSH_TIMEOUT_US, DEFAULT_BATCH_MAX_COUNT};
-use crate::router::messages::TYPE_TRANSPORT;
+use crate::router::messages_v2;
 use crate::types::PublicKey;
 
 use ironguard_platform::endpoint::Endpoint;
@@ -76,27 +75,50 @@ pub async fn tun_worker<T: tun::Tun, B: udp::Udp>(wg: WireGuard<T, B>, reader: T
 
 /// Dispatch a single received UDP message by type.
 ///
-/// Handles WireGuard handshake messages (INITIATION, RESPONSE, COOKIE_REPLY)
-/// and transport data messages.
+/// Uses two-stage type detection:
+/// 1. Read the first byte (u8) for v2 frame types (0x04+: DATA, KEEPALIVE,
+///    CONTROL, BATCH). v2 headers have a single-byte type field followed by
+///    flags and reserved bytes. Reading all 4 bytes as a u32 would incorrectly
+///    incorporate flags into the type comparison.
+/// 2. For legacy WireGuard handshake messages (types 1-3), read bytes 0..4 as
+///    a u32 LE, matching the legacy 4-byte type field layout.
+///
+/// This correctly handles the v2 frame format where byte 0 is the type,
+/// byte 1 is flags, and bytes 2-3 are reserved.
 fn dispatch_udp_message<T: tun::Tun, B: udp::Udp>(
     wg: &WireGuard<T, B>,
     msg: Vec<u8>,
     src: B::Endpoint,
 ) {
-    if msg.len() < std::mem::size_of::<u32>() {
+    if msg.len() < 4 {
         return;
     }
 
-    let msg_type = u32::from_le_bytes(msg[..4].try_into().unwrap());
-    match msg_type {
-        TYPE_COOKIE_REPLY | TYPE_INITIATION | TYPE_RESPONSE => {
-            wg.pending.fetch_add(1, Ordering::SeqCst);
-            wg.queue.send(HandshakeJob::Message(msg, src));
-        }
-        TYPE_TRANSPORT => {
+    // First byte is the type in both v2 frames and legacy handshake messages
+    // (legacy types 1-3 are stored as u32 LE, so byte 0 is the low byte).
+    let first_byte = msg[0];
+
+    match first_byte {
+        // v2 transport frame types — route to the crypto-key router for
+        // decryption. Only the first byte is checked so that non-zero flags
+        // (byte 1) do not cause a mismatch.
+        messages_v2::TYPE_DATA | messages_v2::TYPE_KEEPALIVE => {
             let _ = wg.router.recv(src, msg);
         }
-        _ => (),
+
+        // Legacy WireGuard handshake messages use a u32 LE type field.
+        // Verify the full 4 bytes to avoid false matches (e.g. a v2 frame
+        // with type 1/2/3 would never occur since v2 types start at 0x04).
+        _ => {
+            let msg_type = u32::from_le_bytes(msg[..4].try_into().unwrap());
+            match msg_type {
+                TYPE_COOKIE_REPLY | TYPE_INITIATION | TYPE_RESPONSE => {
+                    wg.pending.fetch_add(1, Ordering::SeqCst);
+                    wg.queue.send(HandshakeJob::Message(msg, src));
+                }
+                _ => (),
+            }
+        }
     }
 }
 

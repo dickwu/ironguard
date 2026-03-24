@@ -2,7 +2,7 @@ use crate::constants::REJECT_AFTER_MESSAGES;
 
 use super::device::DecryptionState;
 use super::ip::inner_length;
-use super::messages_v2::{FrameHeader, HEADER_SIZE, TYPE_DATA};
+use super::messages_v2::{FrameHeader, HEADER_SIZE, TYPE_DATA, TYPE_KEEPALIVE};
 use super::queue::{ParallelJob, Queue, SequentialJob};
 use super::types::Callbacks;
 
@@ -80,9 +80,10 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> ParallelJo
                     }
                 };
 
-                // verify message type
-                if header.msg_type() != TYPE_DATA {
-                    tracing::debug!(msg_type = header.msg_type(), "recv_job: not TYPE_DATA");
+                // verify message type (accept both DATA and KEEPALIVE frames)
+                let mt = header.msg_type();
+                if mt != TYPE_DATA && mt != TYPE_KEEPALIVE {
+                    tracing::debug!(msg_type = mt, "recv_job: not a transport frame type");
                     return false;
                 }
 
