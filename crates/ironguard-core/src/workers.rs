@@ -14,7 +14,7 @@ use crate::types::PublicKey;
 
 use ironguard_platform::endpoint::Endpoint;
 use ironguard_platform::tun::{self, Reader as TunReader};
-use ironguard_platform::udp::{self, UdpReader};
+use ironguard_platform::udp::{self, UdpReader, UdpWriter};
 
 /// Size of the AEAD tag appended after ciphertext.
 const CAPACITY_MESSAGE_POSTFIX: usize = 16;
@@ -224,6 +224,32 @@ pub async fn handshake_worker<T: tun::Tun, B: udp::Udp>(
                 }
             }
         }
+    }
+}
+
+/// TUN write worker: drains decrypted packets from the channel and writes
+/// them to the TUN device.
+///
+/// Runs as a Tokio task. Exits when the channel sender is dropped.
+pub async fn tun_write_worker<W: tun::Writer>(
+    mut rx: mpsc::Receiver<Vec<u8>>,
+    writer: W,
+) {
+    while let Some(buf) = rx.recv().await {
+        let _ = writer.write(&buf).await;
+    }
+}
+
+/// UDP write worker: drains encrypted packets from the channel and writes
+/// them to the UDP socket.
+///
+/// Runs as a Tokio task. Exits when the channel sender is dropped.
+pub async fn udp_write_worker<E: Endpoint, W: UdpWriter<E>>(
+    mut rx: mpsc::Receiver<(Vec<u8>, E)>,
+    writer: W,
+) {
+    while let Some((buf, mut dst)) = rx.recv().await {
+        let _ = writer.write(&buf, &mut dst).await;
     }
 }
 
