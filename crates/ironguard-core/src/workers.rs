@@ -17,7 +17,9 @@ use crate::device::WireGuard;
 use crate::pipeline::batch::{
     DEFAULT_BATCH_FLUSH_TIMEOUT_US, DEFAULT_BATCH_MAX_BYTES, DEFAULT_BATCH_MAX_COUNT,
 };
-use crate::pipeline::pool::{BufferPool, SMALL_BUF_SIZE};
+use crate::pipeline::pool::BufferPool;
+#[cfg(test)]
+use crate::pipeline::pool::SMALL_BUF_SIZE;
 use crate::router::messages_v2::{self, BatchHeader};
 use crate::types::PublicKey;
 
@@ -52,44 +54,24 @@ const fn padding(size: usize, mtu: usize) -> usize {
     min(mtu, size + (pad - size % pad) % pad)
 }
 
-/// Allocate a buffer for TUN reads. Attempts the pool first; falls back to
-/// a heap `Vec` if the pool is exhausted or the required size exceeds
-/// `SMALL_BUF_SIZE`.
+/// Allocate a buffer for TUN reads.
 ///
-/// Returns `(buffer, used_pool)`: the buffer as a `Vec<u8>` and a flag
-/// indicating whether the allocation came from the pool.
+/// Allocates directly on the heap. The pool will be used for zero-copy
+/// once the router interfaces accept `PoolVec` instead of `Vec<u8>`.
+/// This removes the previous pointless alloc-then-drop cycle.
 #[inline]
-fn alloc_tun_buffer(pool: &Arc<BufferPool>, size: usize) -> Vec<u8> {
+fn alloc_tun_buffer(_pool: &Arc<BufferPool>, size: usize) -> Vec<u8> {
     let total = size + CAPACITY_MESSAGE_POSTFIX;
-    if total <= SMALL_BUF_SIZE {
-        if let Some(guard) = pool.alloc_small() {
-            // Convert the pool buffer to a Vec for compatibility with
-            // the router's send() interface which takes Vec<u8>.
-            // The guard is dropped here, returning the slot to the pool.
-            // This still avoids the zero-initialization cost of vec![0; N]
-            // since the pool buffers are pre-allocated.
-            let v = vec![0u8; total];
-            // Copy is not needed -- we just need a correctly sized buffer.
-            // Drop the guard to return the pool slot immediately.
-            drop(guard);
-            return v;
-        }
-    }
     vec![0u8; total]
 }
 
-/// Allocate a buffer for UDP reads. Attempts the pool first; falls back to
-/// a heap `Vec` if the pool is exhausted or the required size exceeds
-/// `SMALL_BUF_SIZE`.
+/// Allocate a buffer for UDP reads.
+///
+/// Allocates directly on the heap. The pool will be used for zero-copy
+/// once the router interfaces accept `PoolVec` instead of `Vec<u8>`.
+/// This removes the previous pointless alloc-then-drop cycle.
 #[inline]
-fn alloc_udp_buffer(pool: &Arc<BufferPool>, size: usize) -> Vec<u8> {
-    if size <= SMALL_BUF_SIZE {
-        if let Some(guard) = pool.alloc_small() {
-            let v = vec![0u8; size];
-            drop(guard);
-            return v;
-        }
-    }
+fn alloc_udp_buffer(_pool: &Arc<BufferPool>, size: usize) -> Vec<u8> {
     vec![0u8; size]
 }
 
