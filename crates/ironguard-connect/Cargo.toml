@@ -14,6 +14,14 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 rand = { workspace = true }
 stunclient = { workspace = true }
+igd-next = { workspace = true }
+mdns-sd = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+quinn = { workspace = true }
+rustls = { workspace = true }
+rcgen = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
