@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::constants::SIZE_MESSAGE_PREFIX;
-use crate::types::{Key, KeyPair};
+use crate::types::{CachedAeadKey, Key, KeyPair};
 use crate::workers::{tun_write_worker, udp_write_worker};
 
 use super::device::DeviceHandle;
@@ -130,12 +130,16 @@ macro_rules! no_events {
 // --- Helpers ---
 
 fn dummy_keypair(initiator: bool) -> KeyPair {
+    let k1_bytes = [0x53u8; 32];
+    let k2_bytes = [0x52u8; 32];
     let k1 = Key {
-        key: [0x53u8; 32],
+        cached_aead: CachedAeadKey::new(&k1_bytes),
+        key: k1_bytes,
         id: 0x646e6573,
     };
     let k2 = Key {
-        key: [0x52u8; 32],
+        cached_aead: CachedAeadKey::new(&k2_bytes),
+        key: k2_bytes,
         id: 0x76636572,
     };
     if initiator {

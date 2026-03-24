@@ -7,7 +7,7 @@ use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, 
 use ironguard_core::constants::SIZE_MESSAGE_PREFIX;
 use ironguard_core::router::device::DeviceHandle;
 use ironguard_core::router::types::Callbacks;
-use ironguard_core::types::{Key, KeyPair};
+use ironguard_core::types::{CachedAeadKey, Key, KeyPair};
 use ironguard_core::workers::{tun_write_worker, udp_write_worker};
 
 use ironguard_platform::dummy::tun as dummy_tun;
@@ -171,12 +171,16 @@ const WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 /// Create a matched keypair: the initiator side and the responder side share
 /// send/recv keys in opposite directions.
 fn make_keypair(initiator: bool) -> KeyPair {
+    let k1_bytes = [0x53u8; 32];
+    let k2_bytes = [0x52u8; 32];
     let k1 = Key {
-        key: [0x53u8; 32],
+        cached_aead: CachedAeadKey::new(&k1_bytes),
+        key: k1_bytes,
         id: 0x646e6573,
     };
     let k2 = Key {
-        key: [0x52u8; 32],
+        cached_aead: CachedAeadKey::new(&k2_bytes),
+        key: k2_bytes,
         id: 0x76636572,
     };
     if initiator {

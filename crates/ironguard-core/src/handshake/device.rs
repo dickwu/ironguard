@@ -23,7 +23,7 @@ use crate::handshake::messages::{
 use crate::handshake::noise;
 use crate::handshake::peer::{Peer, PeerState};
 use crate::handshake::ratelimiter::RateLimiter;
-use crate::{Key, KeyPair, PublicKey, StaticSecret};
+use crate::{CachedAeadKey, Key, KeyPair, PublicKey, StaticSecret};
 
 /// Output of `Device::process()`:
 ///   (peer_opaque, bytes_to_send, keypair_if_complete)
@@ -103,10 +103,12 @@ fn extract_keypair_from_hs(
         birth: Instant::now(),
         initiator: is_initiator,
         send: Key {
+            cached_aead: CachedAeadKey::new(&send_key_bytes),
             key: send_key_bytes,
             id: remote_id,
         },
         recv: Key {
+            cached_aead: CachedAeadKey::new(&recv_key_bytes),
             key: recv_key_bytes,
             id: local_id,
         },

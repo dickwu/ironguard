@@ -885,10 +885,12 @@ async fn cmd_up_v2(interface: &str, config_path: &str, foreground: bool) -> Resu
                         birth: Instant::now(),
                         initiator: true,
                         send: ironguard_core::Key {
+                            cached_aead: ironguard_core::CachedAeadKey::new(&session.keys.send_key),
                             key: session.keys.send_key,
                             id: session.peer_receiver_id,
                         },
                         recv: ironguard_core::Key {
+                            cached_aead: ironguard_core::CachedAeadKey::new(&session.keys.recv_key),
                             key: session.keys.recv_key,
                             id: session.receiver_id,
                         },
@@ -1134,10 +1136,12 @@ async fn cmd_up_v2(interface: &str, config_path: &str, foreground: bool) -> Resu
                         birth: Instant::now(),
                         initiator: true,
                         send: ironguard_core::Key {
+                            cached_aead: ironguard_core::CachedAeadKey::new(&session.keys.send_key),
                             key: session.keys.send_key,
                             id: session.peer_receiver_id,
                         },
                         recv: ironguard_core::Key {
+                            cached_aead: ironguard_core::CachedAeadKey::new(&session.keys.recv_key),
                             key: session.keys.recv_key,
                             id: session.receiver_id,
                         },
@@ -1277,10 +1281,12 @@ impl ironguard_core::session::tasks::KeyInstaller for WgKeyInstaller {
                 birth: std::time::Instant::now(),
                 initiator,
                 send: ironguard_core::Key {
+                    cached_aead: ironguard_core::CachedAeadKey::new(&session.keys.send_key),
                     key: session.keys.send_key,
                     id: session.peer_receiver_id,
                 },
                 recv: ironguard_core::Key {
+                    cached_aead: ironguard_core::CachedAeadKey::new(&session.keys.recv_key),
                     key: session.keys.recv_key,
                     id: session.receiver_id,
                 },
@@ -1326,10 +1332,12 @@ impl ironguard_core::session::tasks::KeyInstaller for WgKeyInstaller {
                 birth: std::time::Instant::now(),
                 initiator,
                 send: ironguard_core::Key {
+                    cached_aead: ironguard_core::CachedAeadKey::new(&session.keys.send_key),
                     key: session.keys.send_key,
                     id: session.peer_receiver_id,
                 },
                 recv: ironguard_core::Key {
+                    cached_aead: ironguard_core::CachedAeadKey::new(&session.keys.recv_key),
                     key: session.keys.recv_key,
                     id: session.receiver_id,
                 },

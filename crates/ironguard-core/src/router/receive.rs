@@ -11,7 +11,7 @@ use ironguard_platform::tun;
 use ironguard_platform::udp;
 
 use core::sync::atomic::{AtomicBool, Ordering};
-use ring::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
+use ring::aead::{Aad, Nonce};
 use spin::Mutex;
 use std::sync::Arc;
 
@@ -96,10 +96,9 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> ParallelJo
                 nonce_bytes[4..].copy_from_slice(&counter.to_le_bytes());
                 let nonce = Nonce::assume_unique_for_key(nonce_bytes);
 
-                // Use the full 16-byte v2 header as AAD for authenticated decryption
-                let key = LessSafeKey::new(
-                    UnboundKey::new(&AES_256_GCM, &job.state.keypair.recv.key[..]).unwrap(),
-                );
+                // Use the cached pre-expanded AES-256-GCM key to avoid per-packet
+                // key schedule overhead (~200ns saved per packet).
+                let key = &job.state.keypair.recv.cached_aead.aead;
 
                 let packet = &mut msg.1[HEADER_SIZE..];
                 match key.open_in_place(nonce, Aad::from(&aad_bytes[..]), packet) {

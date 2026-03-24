@@ -11,4 +11,4 @@ pub mod timers;
 pub mod types;
 pub mod workers;
 
-pub use types::{Key, KeyPair, PublicKey, StaticSecret};
+pub use types::{CachedAeadKey, Key, KeyPair, PublicKey, StaticSecret};
