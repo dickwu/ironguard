@@ -221,6 +221,21 @@ impl tun::PlatformTun for MacosTun {
             }
         }
 
+        // Also try to increase the global socket buffer limit to 8MB.
+        // This raises the ceiling for per-socket SO_RCVBUF/SO_SNDBUF
+        // settings used by the UDP layer. Requires root privileges.
+        match std::process::Command::new("sysctl")
+            .args(["-w", "kern.ipc.maxsockbuf=8388608"])
+            .output()
+        {
+            Ok(output) if output.status.success() => {
+                tracing::debug!("increased kern.ipc.maxsockbuf to 8MB");
+            }
+            _ => {
+                tracing::debug!("kern.ipc.maxsockbuf tuning failed (requires root)");
+            }
+        }
+
         let raw_fd = device.as_raw_fd();
 
         let tun_device = TunDevice { device };

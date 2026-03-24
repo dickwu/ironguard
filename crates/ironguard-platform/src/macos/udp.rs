@@ -1,5 +1,6 @@
 use std::io;
 use std::net::SocketAddr;
+use std::os::fd::AsRawFd;
 use std::sync::Arc;
 
 use crate::endpoint::Endpoint;
@@ -82,6 +83,28 @@ impl udp::PlatformUdp for MacosUdp {
         // Create a std::net::UdpSocket first, then convert to tokio
         let std_socket = std::net::UdpSocket::bind(addr)?;
         std_socket.set_nonblocking(true)?;
+
+        // Increase socket buffers to 1 MB for high-throughput batch I/O.
+        // Default macOS buffers are too small and cause drops under load.
+        let buf_size: libc::c_int = 1_048_576;
+        let fd = std_socket.as_raw_fd();
+        unsafe {
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_RCVBUF,
+                &buf_size as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                &buf_size as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+        }
+        tracing::debug!("set UDP SO_RCVBUF/SO_SNDBUF to 1MB");
 
         let actual_port = std_socket.local_addr()?.port();
 
