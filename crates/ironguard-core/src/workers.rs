@@ -222,13 +222,17 @@ pub async fn udp_worker<T: tun::Tun, B: udp::Udp>(wg: WireGuard<T, B>, reader: B
         };
         msg.truncate(n);
 
+        debug!(len = n, src = ?src.to_address(), "udp_worker: received packet");
+
         // Re-read MTU after the (potentially blocking) read returns.
         let mtu = wg.mtu.load(Ordering::Relaxed);
         if mtu == 0 {
+            debug!("udp_worker: dropping packet (mtu=0)");
             continue;
         }
 
         if msg.len() < std::mem::size_of::<u32>() {
+            debug!(len = msg.len(), "udp_worker: dropping undersized packet");
             continue;
         }
 
@@ -247,11 +251,22 @@ pub async fn udp_worker<T: tun::Tun, B: udp::Udp>(wg: WireGuard<T, B>, reader: B
             _ => {
                 // v2 frame dispatch on the first byte
                 if msg.len() < messages_v2::HEADER_SIZE {
+                    debug!(len = msg.len(), "udp_worker: v2 frame too short");
                     continue;
                 }
                 match msg[0] {
                     messages_v2::TYPE_DATA | messages_v2::TYPE_KEEPALIVE => {
-                        let _ = wg.router.recv(src, msg);
+                        debug!(
+                            frame_type = msg[0],
+                            len = msg.len(),
+                            "udp_worker: dispatching v2 data/keepalive to router"
+                        );
+                        match wg.router.recv(src, msg) {
+                            Ok(()) => {}
+                            Err(e) => {
+                                debug!(error = ?e, "udp_worker: router.recv failed");
+                            }
+                        }
                     }
                     messages_v2::TYPE_CONTROL => {
                         debug!(
@@ -321,7 +336,15 @@ pub async fn tun_write_worker<T: tun::Writer>(mut rx: mpsc::Receiver<Vec<u8>>, w
 
         // Flush the batch: write all collected packets to TUN.
         for pkt in batch.drain(..) {
-            let _ = writer.write(&pkt).await;
+            tracing::debug!(len = pkt.len(), "tun_write_worker: writing to TUN");
+            match writer.write(&pkt).await {
+                Ok(()) => {
+                    tracing::debug!(len = pkt.len(), "tun_write_worker: write succeeded");
+                }
+                Err(e) => {
+                    tracing::warn!(len = pkt.len(), error = %e, "tun_write_worker: write failed");
+                }
+            }
         }
         total_bytes = 0;
     }

@@ -11,3 +11,8 @@ Cargo.lock
 .mcp*
 claude.md
 
+docs/*
+scripts/*
+
+configs/*
+

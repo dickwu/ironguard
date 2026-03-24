@@ -5,7 +5,7 @@
 IronGuard is a modern, cross-platform WireGuard implementation in pure Rust (edition 2024). It implements the full WireGuard protocol with a v2 high-performance pipeline, optional QUIC-based session management, and post-quantum key exchange (ML-KEM-768).
 
 **Codebase:** ~15,750 lines of Rust across 4 workspace crates
-**Tests:** 173 passing (with `--features quic`), 0 failures
+**Tests:** 174 passing (with `--features quic`), 0 failures
 **Commits:** 37 (since initial scaffold)
 
 ## Architecture
@@ -127,10 +127,10 @@ Key optimizations:
 - [ ] Daemonize support (currently foreground-only)
 - [ ] Linux `cmd_up` for legacy WireGuard path (currently macOS-only)
 
-### Tunnel Debugging (in progress)
+### Tunnel Debugging (fixed)
 - QUIC session establishment: **working** (client connects, server accepts, keys installed)
-- Data plane packet flow: **needs debugging** (encrypted packets not yet flowing through tunnel)
-- Root cause likely: key agreement mismatch between client/server roles or endpoint routing
+- Data plane packet flow: **fixed** (receiver_id wiring corrected)
+- Root cause was: `SessionResult` discarded the peer's receiver_id from `DataPlaneInit`, so `send.id`/`recv.id` in KeyPairs were wrong — the router recv map lookup always failed
 
 ## Spec & Plan Documents
 

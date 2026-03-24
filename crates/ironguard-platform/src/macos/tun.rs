@@ -90,14 +90,27 @@ impl tun::Writer for MacosTunWriter {
     type Error = MacosTunError;
 
     async fn write(&self, src: &[u8]) -> Result<(), Self::Error> {
+        // macOS utun requires a 4-byte protocol info header (AF family)
+        // before each packet. Determine the address family from the IP
+        // version nibble and prepend it using a gathered write (writev).
+        let af: u32 = match src.first().map(|b| b >> 4) {
+            Some(6) => libc::AF_INET6 as u32,
+            _ => libc::AF_INET as u32,
+        };
+        let af_bytes = af.to_be_bytes();
+
         loop {
             let mut guard = self.inner.writable().await?;
             match guard.try_io(|fd| {
+                let iov = [
+                    io::IoSlice::new(&af_bytes),
+                    io::IoSlice::new(src),
+                ];
                 let n = unsafe {
-                    libc::write(
+                    libc::writev(
                         fd.get_ref().as_raw_fd(),
-                        src.as_ptr() as *const libc::c_void,
-                        src.len(),
+                        iov.as_ptr() as *const libc::iovec,
+                        iov.len() as libc::c_int,
                     )
                 };
                 if n < 0 {

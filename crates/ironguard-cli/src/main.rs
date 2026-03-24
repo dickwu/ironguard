@@ -879,16 +879,18 @@ async fn cmd_up_v2(interface: &str, config_path: &str, foreground: bool) -> Resu
                     );
 
                     // Install the derived keys into the router as a KeyPair.
+                    // send.id = peer's receiver_id (what the peer expects in frame headers)
+                    // recv.id = our receiver_id (registered in our recv map for lookup)
                     let keypair = ironguard_core::KeyPair {
                         birth: Instant::now(),
                         initiator: true,
                         send: ironguard_core::Key {
                             key: session.keys.send_key,
-                            id: session.receiver_id,
+                            id: session.peer_receiver_id,
                         },
                         recv: ironguard_core::Key {
                             key: session.keys.recv_key,
-                            id: receiver_id,
+                            id: session.receiver_id,
                         },
                     };
                     handle.add_keypair(keypair);
@@ -1125,16 +1127,19 @@ async fn cmd_up_v2(interface: &str, config_path: &str, foreground: bool) -> Resu
                         session.epoch, session.receiver_id
                     );
 
+                    // Install the derived keys into the router as a KeyPair.
+                    // send.id = peer's receiver_id (what the peer expects in frame headers)
+                    // recv.id = our receiver_id (registered in our recv map for lookup)
                     let keypair = ironguard_core::KeyPair {
                         birth: Instant::now(),
                         initiator: true,
                         send: ironguard_core::Key {
                             key: session.keys.send_key,
-                            id: session.receiver_id,
+                            id: session.peer_receiver_id,
                         },
                         recv: ironguard_core::Key {
                             key: session.keys.recv_key,
-                            id: receiver_id,
+                            id: session.receiver_id,
                         },
                     };
                     handle.add_keypair(keypair);
@@ -1266,22 +1271,26 @@ impl ironguard_core::session::tasks::KeyInstaller for WgKeyInstaller {
     ) {
         let pk = ironguard_core::PublicKey::from_bytes(*peer_pk);
         if let Some(handle) = self.wg.get_peer_handle(&pk) {
+            // send.id = peer's receiver_id (what the peer expects in frame headers)
+            // recv.id = our receiver_id (registered in our recv map for lookup)
             let keypair = ironguard_core::KeyPair {
                 birth: std::time::Instant::now(),
                 initiator,
                 send: ironguard_core::Key {
                     key: session.keys.send_key,
-                    id: session.receiver_id,
+                    id: session.peer_receiver_id,
                 },
                 recv: ironguard_core::Key {
                     key: session.keys.recv_key,
-                    id: rand::random(),
+                    id: session.receiver_id,
                 },
             };
             handle.add_keypair(keypair);
             tracing::info!(
                 peer = hex::encode(peer_pk),
                 epoch = session.epoch,
+                send_id = session.peer_receiver_id,
+                recv_id = session.receiver_id,
                 "installed keypair into router"
             );
         } else {
@@ -1311,22 +1320,26 @@ impl ironguard_core::session::tasks::KeyInstaller for WgKeyInstaller {
     ) {
         let pk = ironguard_core::PublicKey::from_bytes(*peer_pk);
         if let Some(handle) = self.wg.get_peer_handle(&pk) {
+            // send.id = peer's receiver_id (what the peer expects in frame headers)
+            // recv.id = our receiver_id (registered in our recv map for lookup)
             let keypair = ironguard_core::KeyPair {
                 birth: std::time::Instant::now(),
                 initiator,
                 send: ironguard_core::Key {
                     key: session.keys.send_key,
-                    id: session.receiver_id,
+                    id: session.peer_receiver_id,
                 },
                 recv: ironguard_core::Key {
                     key: session.keys.recv_key,
-                    id: rand::random(),
+                    id: session.receiver_id,
                 },
             };
             handle.add_keypair(keypair);
             tracing::info!(
                 peer = hex::encode(peer_pk),
                 epoch = session.epoch,
+                send_id = session.peer_receiver_id,
+                recv_id = session.receiver_id,
                 "installed keypair into router"
             );
         } else {

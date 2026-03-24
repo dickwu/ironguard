@@ -34,6 +34,8 @@ pub struct PeerSession {
     pub epoch: u32,
     /// Our receiver ID advertised to this peer.
     pub receiver_id: u32,
+    /// The peer's receiver ID (what they expect in incoming frame headers).
+    pub peer_receiver_id: u32,
     /// When this session was established or last rekeyed.
     pub established_at: Instant,
     /// The TLS exporter secret, retained for epoch-based rekeying.
@@ -152,7 +154,7 @@ impl SessionManager {
         .map_err(|_| SessionError::QuicDatagram(format!("handshake timeout connecting to {peer_addr}")))?
         .map_err(|e| SessionError::QuicDatagram(format!("handshake: {e}")))?;
 
-        let (keys, _peer_init) =
+        let (keys, peer_init) =
             exchange_data_plane_keys(&connection, Role::Client, data_port, receiver_id).await?;
 
         // Extract the TLS exporter secret for future rekeying.
@@ -165,6 +167,7 @@ impl SessionManager {
             keys: keys.clone(),
             epoch: 0,
             receiver_id,
+            peer_receiver_id: peer_init.receiver_id,
         };
 
         let session = PeerSession {
@@ -172,6 +175,7 @@ impl SessionManager {
             keys,
             epoch: 0,
             receiver_id,
+            peer_receiver_id: peer_init.receiver_id,
             established_at: Instant::now(),
             exporter_secret,
             role: Role::Client,
@@ -198,7 +202,7 @@ impl SessionManager {
         data_port: u16,
         receiver_id: u32,
     ) -> Result<SessionResult, SessionError> {
-        let (keys, _peer_init) =
+        let (keys, peer_init) =
             exchange_data_plane_keys(&connection, Role::Server, data_port, receiver_id).await?;
 
         // Extract the TLS exporter secret for future rekeying.
@@ -211,6 +215,7 @@ impl SessionManager {
             keys: keys.clone(),
             epoch: 0,
             receiver_id,
+            peer_receiver_id: peer_init.receiver_id,
         };
 
         let session = PeerSession {
@@ -218,6 +223,7 @@ impl SessionManager {
             keys,
             epoch: 0,
             receiver_id,
+            peer_receiver_id: peer_init.receiver_id,
             established_at: Instant::now(),
             exporter_secret,
             role: Role::Server,
@@ -321,10 +327,13 @@ impl SessionManager {
             role,
         );
 
+        // `new_receiver_id` from the ack is the responder's new receiver ID.
+        // `our_receiver_id` is the initiator's new receiver ID.
         let result = SessionResult {
             keys: new_keys.clone(),
             epoch,
-            receiver_id: new_receiver_id,
+            receiver_id: our_receiver_id,
+            peer_receiver_id: new_receiver_id,
         };
 
         // Update the session in place.
@@ -333,7 +342,8 @@ impl SessionManager {
             if let Some(session) = inner.sessions.get_mut(peer_pk) {
                 session.keys = new_keys;
                 session.epoch = epoch;
-                session.receiver_id = new_receiver_id;
+                session.receiver_id = our_receiver_id;
+                session.peer_receiver_id = new_receiver_id;
                 session.established_at = Instant::now();
             }
         }
@@ -358,7 +368,10 @@ impl SessionManager {
 pub struct SessionResult {
     pub keys: DataPlaneKeys,
     pub epoch: u32,
+    /// Our local receiver ID (advertised to the peer).
     pub receiver_id: u32,
+    /// The peer's receiver ID (what the peer expects in incoming frame headers).
+    pub peer_receiver_id: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -469,5 +482,86 @@ mod tests {
         // Verify sessions are tracked.
         assert_eq!(client_mgr.session_count(), 1);
         assert!(client_mgr.with_session(&peer_pk, |_| ()).is_some());
+    }
+
+    /// Verify that `peer_receiver_id` is correctly propagated so that
+    /// send.id / recv.id can be wired correctly in the WireGuard router.
+    ///
+    /// The invariant is:
+    ///   client.peer_receiver_id == server.receiver_id  (client must send with server's ID)
+    ///   server.peer_receiver_id == client.receiver_id  (server must send with client's ID)
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_peer_receiver_id_symmetry() {
+        let server_config = make_test_server_config();
+        let server_endpoint =
+            quinn::Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap())
+                .expect("server endpoint");
+        let server_port = server_endpoint.local_addr().unwrap().port();
+
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let server_barrier = barrier.clone();
+
+        // Server task: accept with receiver_id = 200
+        let server_handle = tokio::spawn(async move {
+            let incoming = server_endpoint.accept().await.expect("accept");
+            let connection = incoming.await.expect("incoming connection");
+
+            let peer_pk = [0xAA; 32];
+            let server_mgr = SessionManager::new(QuicSessionConfig::default());
+            let session = server_mgr
+                .accept(peer_pk, connection, 51821, 200)
+                .await
+                .expect("server accept");
+
+            server_barrier.wait().await;
+            session
+        });
+
+        // Client: connect with receiver_id = 100
+        let peer_pk = [0xBB; 32];
+        let client_mgr = SessionManager::new(QuicSessionConfig::default());
+
+        let client_session = client_mgr
+            .connect(
+                peer_pk,
+                format!("127.0.0.1:{server_port}").parse().unwrap(),
+                51820,
+                100,
+            )
+            .await
+            .expect("client connect");
+
+        barrier.wait().await;
+        let server_session = server_handle.await.expect("server join");
+
+        // Critical invariant: each side knows the peer's receiver_id.
+        // Client's peer_receiver_id should be server's receiver_id (200).
+        assert_eq!(
+            client_session.peer_receiver_id, server_session.receiver_id,
+            "client.peer_receiver_id must equal server.receiver_id"
+        );
+        // Server's peer_receiver_id should be client's receiver_id (100).
+        assert_eq!(
+            server_session.peer_receiver_id, client_session.receiver_id,
+            "server.peer_receiver_id must equal client.receiver_id"
+        );
+
+        // Verify the concrete values.
+        assert_eq!(client_session.receiver_id, 100);
+        assert_eq!(client_session.peer_receiver_id, 200);
+        assert_eq!(server_session.receiver_id, 200);
+        assert_eq!(server_session.peer_receiver_id, 100);
+
+        // Verify that KeyPair IDs would be wired correctly:
+        // client.send.id = client.peer_receiver_id = 200 = server.recv.id
+        // server.send.id = server.peer_receiver_id = 100 = client.recv.id
+        assert_eq!(
+            client_session.peer_receiver_id, server_session.receiver_id,
+            "client send.id must match server recv.id"
+        );
+        assert_eq!(
+            server_session.peer_receiver_id, client_session.receiver_id,
+            "server send.id must match client recv.id"
+        );
     }
 }

@@ -67,17 +67,22 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> ParallelJo
 
             let ok = (|| {
                 if msg.1.len() < HEADER_SIZE + SIZE_TAG {
+                    tracing::debug!(len = msg.1.len(), "recv_job: too short for header+tag");
                     return false;
                 }
 
                 // parse v2 frame header (copy to local to release the immutable borrow)
                 let header = match FrameHeader::from_bytes(&msg.1) {
                     Some(h) => *h,
-                    None => return false,
+                    None => {
+                        tracing::debug!("recv_job: failed to parse frame header");
+                        return false;
+                    }
                 };
 
                 // verify message type
                 if header.msg_type() != TYPE_DATA {
+                    tracing::debug!(msg_type = header.msg_type(), "recv_job: not TYPE_DATA");
                     return false;
                 }
 
@@ -98,8 +103,22 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> ParallelJo
 
                 let packet = &mut msg.1[HEADER_SIZE..];
                 match key.open_in_place(nonce, Aad::from(&aad_bytes[..]), packet) {
-                    Ok(_) => (),
-                    Err(_) => return false,
+                    Ok(_) => {
+                        tracing::debug!(
+                            counter = counter,
+                            payload_len = packet.len() - SIZE_TAG,
+                            "recv_job: decryption succeeded"
+                        );
+                    }
+                    Err(_) => {
+                        tracing::debug!(
+                            counter = counter,
+                            recv_id = header.receiver_id(),
+                            buf_len = msg.1.len(),
+                            "recv_job: AES-GCM decryption FAILED"
+                        );
+                        return false;
+                    }
                 }
 
                 // check that counter is not after reject
@@ -109,7 +128,14 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> ParallelJo
 
                 // check crypto-key router (allowed IPs for source)
                 // keepalive packets (only tag, no payload) are always allowed
-                packet.len() == SIZE_TAG || peer.device.table.check_route(peer, packet)
+                let route_ok = packet.len() == SIZE_TAG || peer.device.table.check_route(peer, packet);
+                if !route_ok {
+                    tracing::debug!(
+                        packet_len = packet.len(),
+                        "recv_job: route check failed"
+                    );
+                }
+                route_ok
             })();
 
             if !ok {
