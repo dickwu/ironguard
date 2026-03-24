@@ -70,6 +70,19 @@ pub trait TransportIO: Send + Sync + 'static {
         batch: &[PacketRef],
         destinations: &[SocketAddr],
     ) -> impl Future<Output = Result<usize, Self::Error>> + Send;
+
+    /// Query the number of datagrams pending in the receive buffer.
+    ///
+    /// Returns `None` if the platform does not support this query.
+    /// On macOS, implementations can use `SO_NUMRCVPKT` to query the
+    /// kernel for the exact datagram count, enabling adaptive batch
+    /// sizing (allocate exactly as many buffers as there are packets).
+    /// On Linux, this is not supported and returns `None`.
+    ///
+    /// The default implementation returns `None`.
+    fn pending_recv(&self) -> Option<u32> {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -242,5 +255,50 @@ mod tests {
     fn test_transport_io_is_send_sync() {
         fn assert_send_sync<T: Send + Sync + 'static>() {}
         assert_send_sync::<DummyTransport>();
+    }
+
+    #[test]
+    fn test_pending_recv_default_returns_none() {
+        let transport = DummyTransport::new();
+        // Default implementation should return None
+        assert_eq!(transport.pending_recv(), None);
+    }
+
+    /// A transport that overrides pending_recv to return a count.
+    struct MockCountTransport {
+        pending: u32,
+    }
+
+    impl TransportIO for MockCountTransport {
+        type Error = io::Error;
+
+        async fn recv_batch(
+            &self,
+            _pool: &BufferPool,
+            _batch: &mut Vec<PacketRef>,
+            _meta: &mut Vec<RecvMeta>,
+            _max: usize,
+        ) -> Result<usize, Self::Error> {
+            Ok(0)
+        }
+
+        async fn send_batch(
+            &self,
+            _pool: &BufferPool,
+            _batch: &[PacketRef],
+            _destinations: &[SocketAddr],
+        ) -> Result<usize, Self::Error> {
+            Ok(0)
+        }
+
+        fn pending_recv(&self) -> Option<u32> {
+            Some(self.pending)
+        }
+    }
+
+    #[test]
+    fn test_pending_recv_custom_impl() {
+        let transport = MockCountTransport { pending: 42 };
+        assert_eq!(transport.pending_recv(), Some(42));
     }
 }
