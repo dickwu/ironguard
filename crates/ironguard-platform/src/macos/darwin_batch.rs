@@ -24,19 +24,11 @@ pub struct MsghdrX {
     pub msg_datalen: usize,
 }
 
-type SendmsgXFn = unsafe extern "C" fn(
-    libc::c_int,
-    *const MsghdrX,
-    libc::c_uint,
-    libc::c_int,
-) -> libc::ssize_t;
+type SendmsgXFn =
+    unsafe extern "C" fn(libc::c_int, *const MsghdrX, libc::c_uint, libc::c_int) -> libc::ssize_t;
 
-type RecvmsgXFn = unsafe extern "C" fn(
-    libc::c_int,
-    *mut MsghdrX,
-    libc::c_uint,
-    libc::c_int,
-) -> libc::ssize_t;
+type RecvmsgXFn =
+    unsafe extern "C" fn(libc::c_int, *mut MsghdrX, libc::c_uint, libc::c_int) -> libc::ssize_t;
 
 /// Runtime-resolved batch syscall function pointers.
 /// `None` if the symbols are not available (future macOS removal).
@@ -50,24 +42,22 @@ impl DarwinBatchIo {
     /// with `None` function pointers if the symbols are not found.
     pub fn probe() -> Self {
         unsafe {
-            let send_sym = libc::dlsym(
-                libc::RTLD_DEFAULT,
-                c"sendmsg_x".as_ptr(),
-            );
-            let recv_sym = libc::dlsym(
-                libc::RTLD_DEFAULT,
-                c"recvmsg_x".as_ptr(),
-            );
+            let send_sym = libc::dlsym(libc::RTLD_DEFAULT, c"sendmsg_x".as_ptr());
+            let recv_sym = libc::dlsym(libc::RTLD_DEFAULT, c"recvmsg_x".as_ptr());
             Self {
                 sendmsg_x: if send_sym.is_null() {
                     None
                 } else {
-                    Some(std::mem::transmute::<*mut libc::c_void, SendmsgXFn>(send_sym))
+                    Some(std::mem::transmute::<*mut libc::c_void, SendmsgXFn>(
+                        send_sym,
+                    ))
                 },
                 recvmsg_x: if recv_sym.is_null() {
                     None
                 } else {
-                    Some(std::mem::transmute::<*mut libc::c_void, RecvmsgXFn>(recv_sym))
+                    Some(std::mem::transmute::<*mut libc::c_void, RecvmsgXFn>(
+                        recv_sym,
+                    ))
                 },
             }
         }
@@ -81,11 +71,7 @@ impl DarwinBatchIo {
     /// Send multiple datagrams in a single syscall.
     /// Returns the number of messages sent, or falls back to
     /// looped sendto if batch is unavailable.
-    pub fn send_batch(
-        &self,
-        fd: RawFd,
-        msgs: &[(Vec<u8>, SocketAddr)],
-    ) -> io::Result<usize> {
+    pub fn send_batch(&self, fd: RawFd, msgs: &[(Vec<u8>, SocketAddr)]) -> io::Result<usize> {
         if let Some(sendmsg_x) = self.sendmsg_x {
             self.send_batch_x(sendmsg_x, fd, msgs)
         } else {
@@ -148,9 +134,7 @@ impl DarwinBatchIo {
             });
         }
 
-        let sent = unsafe {
-            sendmsg_x(fd, headers.as_ptr(), count as libc::c_uint, 0)
-        };
+        let sent = unsafe { sendmsg_x(fd, headers.as_ptr(), count as libc::c_uint, 0) };
 
         if sent < 0 {
             Err(io::Error::last_os_error())
@@ -159,11 +143,7 @@ impl DarwinBatchIo {
         }
     }
 
-    fn send_batch_fallback(
-        &self,
-        fd: RawFd,
-        msgs: &[(Vec<u8>, SocketAddr)],
-    ) -> io::Result<usize> {
+    fn send_batch_fallback(&self, fd: RawFd, msgs: &[(Vec<u8>, SocketAddr)]) -> io::Result<usize> {
         let mut sent = 0;
         for (data, addr) in msgs {
             let (sa, sa_len) = socket_addr_to_raw(addr);
@@ -202,8 +182,7 @@ impl DarwinBatchIo {
 
         let mut headers: Vec<MsghdrX> = Vec::with_capacity(count);
         let mut iovecs: Vec<libc::iovec> = Vec::with_capacity(count);
-        let mut addrs: Vec<libc::sockaddr_storage> =
-            vec![unsafe { std::mem::zeroed() }; count];
+        let mut addrs: Vec<libc::sockaddr_storage> = vec![unsafe { std::mem::zeroed() }; count];
 
         for buf in bufs.iter_mut().take(count) {
             iovecs.push(libc::iovec {
@@ -225,9 +204,7 @@ impl DarwinBatchIo {
             });
         }
 
-        let received = unsafe {
-            recvmsg_x(fd, headers.as_mut_ptr(), count as libc::c_uint, 0)
-        };
+        let received = unsafe { recvmsg_x(fd, headers.as_mut_ptr(), count as libc::c_uint, 0) };
 
         if received < 0 {
             return Err(io::Error::last_os_error());
@@ -273,8 +250,7 @@ impl DarwinBatchIo {
             return Err(io::Error::last_os_error());
         }
 
-        let src = raw_to_socket_addr(&addr)
-            .unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
+        let src = raw_to_socket_addr(&addr).unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
         Ok(vec![(n as usize, src)])
     }
 }
@@ -308,7 +284,10 @@ fn socket_addr_to_raw(addr: &SocketAddr) -> (libc::sockaddr_storage, libc::sockl
             sin.sin_family = libc::AF_INET as libc::sa_family_t;
             sin.sin_port = v4.port().to_be();
             sin.sin_addr.s_addr = u32::from_ne_bytes(v4.ip().octets());
-            (storage, std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t)
+            (
+                storage,
+                std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+            )
         }
         SocketAddr::V6(v6) => {
             let sin6: &mut libc::sockaddr_in6 = unsafe { &mut *(&mut storage as *mut _ as *mut _) };
@@ -318,7 +297,10 @@ fn socket_addr_to_raw(addr: &SocketAddr) -> (libc::sockaddr_storage, libc::sockl
             sin6.sin6_addr.s6_addr = v6.ip().octets();
             sin6.sin6_flowinfo = v6.flowinfo();
             sin6.sin6_scope_id = v6.scope_id();
-            (storage, std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t)
+            (
+                storage,
+                std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t,
+            )
         }
     }
 }

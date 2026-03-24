@@ -32,10 +32,7 @@ impl udp::UdpWriter<MacosEndpoint> for MacosUdpWriter {
 
     /// Send multiple datagrams in a single syscall via sendmsg_x.
     /// Falls back to individual sendto if sendmsg_x is unavailable.
-    async fn write_batch(
-        &self,
-        msgs: &[(Vec<u8>, SocketAddr)],
-    ) -> Result<usize, Self::Error> {
+    async fn write_batch(&self, msgs: &[(Vec<u8>, SocketAddr)]) -> Result<usize, Self::Error> {
         if msgs.is_empty() {
             return Ok(0);
         }
@@ -50,11 +47,9 @@ impl udp::UdpWriter<MacosEndpoint> for MacosUdpWriter {
         // data into a Vec so it can be sent to a blocking thread safely.
         let msgs_owned: Vec<(Vec<u8>, SocketAddr)> = msgs.to_vec();
 
-        let result = tokio::task::spawn_blocking(move || {
-            batch_io.send_batch(fd, &msgs_owned)
-        })
-        .await
-        .map_err(|e| MacosUdpError::Udp(format!("spawn_blocking join error: {e}")))?;
+        let result = tokio::task::spawn_blocking(move || batch_io.send_batch(fd, &msgs_owned))
+            .await
+            .map_err(|e| MacosUdpError::Udp(format!("spawn_blocking join error: {e}")))?;
 
         Ok(result?)
     }
@@ -206,10 +201,7 @@ impl udp::PlatformUdp for MacosUdp {
             socket: Arc::clone(&socket),
             batch_io: Arc::clone(&batch_io),
         };
-        let writer = MacosUdpWriter {
-            socket,
-            batch_io,
-        };
+        let writer = MacosUdpWriter { socket, batch_io };
         let owner = MacosOwner { port: actual_port };
 
         tracing::info!(port = actual_port, "bound UDP socket");
