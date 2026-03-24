@@ -1,5 +1,5 @@
 use std::sync::atomic::Ordering;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 
@@ -9,11 +9,12 @@ use crate::constants::{
 };
 use crate::device::WireGuard;
 use crate::handshake::messages::{TYPE_COOKIE_REPLY, TYPE_INITIATION, TYPE_RESPONSE};
+use crate::pipeline::batch::{DEFAULT_BATCH_FLUSH_TIMEOUT_US, DEFAULT_BATCH_MAX_COUNT};
 use crate::router::messages::TYPE_TRANSPORT;
 use crate::types::PublicKey;
 
 use ironguard_platform::endpoint::Endpoint;
-use ironguard_platform::tun::{self, Reader as TunReader};
+use ironguard_platform::tun::{self, Reader as _};
 use ironguard_platform::udp::{self, UdpReader, UdpWriter};
 
 /// Size of the AEAD tag appended after ciphertext.
@@ -228,28 +229,126 @@ pub async fn handshake_worker<T: tun::Tun, B: udp::Udp>(
 }
 
 /// TUN write worker: drains decrypted packets from the channel and writes
-/// them to the TUN device.
+/// them to the TUN device in batches to minimize context switches.
+///
+/// Strategy:
+/// 1. Block-wait for the first packet.
+/// 2. Drain additional ready packets (non-blocking) up to batch limit.
+/// 3. Write all collected packets in a tight loop.
 ///
 /// Runs as a Tokio task. Exits when the channel sender is dropped.
 pub async fn tun_write_worker<W: tun::Writer>(
     mut rx: mpsc::Receiver<Vec<u8>>,
     writer: W,
 ) {
-    while let Some(buf) = rx.recv().await {
-        let _ = writer.write(&buf).await;
+    let mut batch: Vec<Vec<u8>> = Vec::with_capacity(DEFAULT_BATCH_MAX_COUNT);
+
+    loop {
+        // Step 1: block-wait for at least one packet.
+        let first = match rx.recv().await {
+            Some(buf) => buf,
+            None => return,
+        };
+        batch.push(first);
+
+        // Step 2: drain additional ready packets without blocking.
+        while batch.len() < DEFAULT_BATCH_MAX_COUNT {
+            match rx.try_recv() {
+                Ok(buf) => batch.push(buf),
+                Err(_) => break,
+            }
+        }
+
+        // Step 3: if we only got one packet and more may arrive, wait
+        // briefly before flushing to amortize syscall overhead.
+        if batch.len() == 1 {
+            let timeout = Duration::from_micros(DEFAULT_BATCH_FLUSH_TIMEOUT_US);
+            if let Ok(Some(buf)) = tokio::time::timeout(timeout, rx.recv()).await {
+                batch.push(buf);
+                // Drain any further ready packets.
+                while batch.len() < DEFAULT_BATCH_MAX_COUNT {
+                    match rx.try_recv() {
+                        Ok(buf) => batch.push(buf),
+                        Err(_) => break,
+                    }
+                }
+            }
+        }
+
+        // Step 4: write all collected packets in a tight loop.
+        for buf in batch.drain(..) {
+            let _ = writer.write(&buf).await;
+        }
     }
 }
 
-/// UDP write worker: drains encrypted packets from the channel and writes
-/// them to the UDP socket.
+/// UDP write worker: drains encrypted packets from the channel and sends
+/// them via the UDP socket in batches using `write_batch()`.
+///
+/// Strategy:
+/// 1. Block-wait for the first packet.
+/// 2. Drain additional ready packets (non-blocking) up to batch limit.
+/// 3. If only one packet arrived, wait briefly (50us) for more.
+/// 4. Flush the batch via `write_batch()` (sendmsg_x on macOS, sendmmsg
+///    on Linux) which sends all datagrams in a single syscall.
+///
+/// Falls back to per-packet `write()` if `write_batch()` fails.
 ///
 /// Runs as a Tokio task. Exits when the channel sender is dropped.
 pub async fn udp_write_worker<E: Endpoint, W: UdpWriter<E>>(
     mut rx: mpsc::Receiver<(Vec<u8>, E)>,
     writer: W,
 ) {
-    while let Some((buf, mut dst)) = rx.recv().await {
-        let _ = writer.write(&buf, &mut dst).await;
+    let mut batch: Vec<(Vec<u8>, E)> = Vec::with_capacity(DEFAULT_BATCH_MAX_COUNT);
+
+    loop {
+        // Step 1: block-wait for at least one packet.
+        let first = match rx.recv().await {
+            Some(item) => item,
+            None => return,
+        };
+        batch.push(first);
+
+        // Step 2: drain additional ready packets without blocking.
+        while batch.len() < DEFAULT_BATCH_MAX_COUNT {
+            match rx.try_recv() {
+                Ok(item) => batch.push(item),
+                Err(_) => break,
+            }
+        }
+
+        // Step 3: if we only got one packet and more may arrive, wait
+        // briefly before flushing to amortize syscall overhead.
+        if batch.len() == 1 {
+            let timeout = Duration::from_micros(DEFAULT_BATCH_FLUSH_TIMEOUT_US);
+            if let Ok(Some(item)) = tokio::time::timeout(timeout, rx.recv()).await {
+                batch.push(item);
+                // Drain any further ready packets.
+                while batch.len() < DEFAULT_BATCH_MAX_COUNT {
+                    match rx.try_recv() {
+                        Ok(item) => batch.push(item),
+                        Err(_) => break,
+                    }
+                }
+            }
+        }
+
+        // Step 4: convert endpoints to SocketAddr and send via write_batch.
+        if batch.len() == 1 {
+            // Single packet: use the direct write path to avoid the
+            // Vec<(Vec<u8>, SocketAddr)> allocation.
+            let (buf, mut dst) = batch.pop().unwrap();
+            let _ = writer.write(&buf, &mut dst).await;
+        } else {
+            // Multiple packets: batch them into a single syscall.
+            let msgs: Vec<(Vec<u8>, std::net::SocketAddr)> = batch
+                .drain(..)
+                .map(|(buf, ep)| (buf, ep.to_address()))
+                .collect();
+            let _ = writer.write_batch(&msgs).await;
+        }
+
+        batch.clear();
     }
 }
 
