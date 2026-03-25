@@ -176,8 +176,7 @@ impl App {
     }
 
     pub fn refresh_service(&mut self) {
-        self.service_info =
-            Some(actions::system::service_status(&self.sys, &self.interface));
+        self.service_info = Some(actions::system::service_status(&self.sys, &self.interface));
     }
 
     pub fn push_service_log(&mut self, msg: &str) {

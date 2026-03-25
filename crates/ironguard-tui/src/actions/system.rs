@@ -235,9 +235,7 @@ impl System {
     pub fn service_file(&self, iface: &str) -> String {
         match self.os {
             Os::Linux => format!("/etc/systemd/system/ironguard@{iface}.service"),
-            Os::MacOs => format!(
-                "/Library/LaunchDaemons/com.ironguard.{iface}.plist"
-            ),
+            Os::MacOs => format!("/Library/LaunchDaemons/com.ironguard.{iface}.plist"),
         }
     }
 
@@ -281,9 +279,7 @@ pub fn service_status(sys: &System, iface: &str) -> ServiceInfo {
                 && Command::new("launchctl")
                     .args(["list"])
                     .output()
-                    .is_ok_and(|o| {
-                        String::from_utf8_lossy(&o.stdout).contains(&label)
-                    });
+                    .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains(&label));
             // launchd "enabled at boot" = RunAtLoad is true in the plist
             let enabled = installed
                 && std::fs::read_to_string(&file_path)

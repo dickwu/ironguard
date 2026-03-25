@@ -9,8 +9,8 @@ pub fn render(frame: &mut Frame, app: &App) {
         .constraints([
             Constraint::Length(10), // status panel
             Constraint::Length(10), // actions
-            Constraint::Min(4),    // log
-            Constraint::Length(3), // keybindings
+            Constraint::Min(4),     // log
+            Constraint::Length(3),  // keybindings
         ])
         .margin(1)
         .split(frame.area());
@@ -94,14 +94,8 @@ fn render_info(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_actions(frame: &mut Frame, app: &App, area: Rect) {
-    let installed = app
-        .service_info
-        .as_ref()
-        .is_some_and(|i| i.installed);
-    let enabled = app
-        .service_info
-        .as_ref()
-        .is_some_and(|i| i.enabled);
+    let installed = app.service_info.as_ref().is_some_and(|i| i.installed);
+    let enabled = app.service_info.as_ref().is_some_and(|i| i.enabled);
 
     let mut items: Vec<ListItem> = Vec::new();
 
@@ -115,7 +109,11 @@ fn render_actions(frame: &mut Frame, app: &App, area: Rect) {
         items.push(action_item("e", "Enable (start at boot)", Color::Green));
     }
     if installed && enabled {
-        items.push(action_item("d", "Disable (don't start at boot)", Color::Yellow));
+        items.push(action_item(
+            "d",
+            "Disable (don't start at boot)",
+            Color::Yellow,
+        ));
     }
     if installed {
         items.push(action_item("u", "Uninstall service", Color::Red));
