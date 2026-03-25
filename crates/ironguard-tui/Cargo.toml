@@ -1,0 +1,27 @@
+[package]
+name = "ironguard-tui"
+description = "IronGuard WireGuard TUI manager"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "ironguard-tui"
+path = "src/main.rs"
+
+[dependencies]
+ironguard-config = { path = "../ironguard-config" }
+clap = { workspace = true }
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+serde = { workspace = true }
+x25519-dalek = { workspace = true }
+rand = { workspace = true }
+hex = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+chrono = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

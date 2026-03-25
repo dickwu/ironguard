@@ -58,16 +58,24 @@ ironguard/
 
 ## Installation
 
+### Quick Install (Linux/macOS)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dickwu/ironguard/main/scripts/install.sh | sudo bash
+```
+
+Detects your OS and architecture, downloads the latest release, installs both `ironguard` and `ironguard-tui` to `/usr/local/bin/`. Supports `--version=v0.2.2` and `--dir=/custom/path`.
+
 ### Homebrew (macOS)
 
 ```bash
 brew tap dickwu/tap
-brew install ironguard
+brew install ironguard    # installs both ironguard and ironguard-tui
 ```
 
 ### Download Binary
 
-Pre-built binaries for macOS and Linux are available on the [releases page](https://github.com/dickwu/ironguard/releases):
+Pre-built binaries for macOS and Linux are available on the [releases page](https://github.com/dickwu/ironguard/releases). Each archive contains both `ironguard` (tunnel) and `ironguard-tui` (manager).
 
 | Platform | Binary |
 |----------|--------|
@@ -77,24 +85,22 @@ Pre-built binaries for macOS and Linux are available on the [releases page](http
 | Linux ARM64 | `ironguard-linux-aarch64.tar.gz` |
 
 ```bash
-# Example: download and install on macOS Apple Silicon
+# Download and install both binaries
 curl -sL https://github.com/dickwu/ironguard/releases/latest/download/ironguard-macos-aarch64.tar.gz | tar xz
-sudo mv ironguard /usr/local/bin/
+sudo mv ironguard ironguard-tui /usr/local/bin/
 ```
 
 ### Build from Source
 
 ```bash
-cargo build --release
+# Build everything (tunnel + TUI manager)
+cargo build --workspace --release --features "quic,pq"
 
-# With QUIC transport
-cargo build --release --features quic
+# Install the TUI manager to ~/.cargo/bin/
+cargo install --path crates/ironguard-tui
 
-# With post-quantum crypto
-cargo build --release --features pq
-
-# With everything
-cargo build --release --features "quic,pq"
+# Or install just the tunnel
+cargo install --path crates/ironguard-cli --features "quic,pq"
 ```
 
 ### Generate Keys
@@ -251,6 +257,225 @@ Three modes:
 - `"post_quantum": false` - Disabled (standard WireGuard)
 - `"post_quantum": true` - Enabled with graceful downgrade (log warning if peer lacks PQ key)
 - `"post_quantum": "strict"` - Refuse peers without PQ key exchange
+
+## Quick Start
+
+`ironguard-tui` is a Rust TUI manager for IronGuard. Run it with no arguments for an interactive dashboard, or use subcommands for scripting.
+
+### Interactive (TUI)
+
+```bash
+# Launch the dashboard — shows status, peers, logs, and keybindings
+sudo ironguard-tui
+```
+
+```
++-IronGuard---------------------------------------------------+
+| Status: RUNNING    Interface: wg0    Port: 51820/udp        |
+| Key: a1b2c3d4e5f6...                                        |
++-Peers (2)---------------------------------------------------+
+| Name          IP            Public Key            Keepalive  |
+| laptop        10.0.0.2      f7e8d9c0...           25s       |
+| phone         10.0.0.3      b1a2c3d4...           25s       |
++-Log---------------------------------------------------------+
+| [10:30:22] Server started                                    |
++--------------------------------------------------------------+
+| [s]etup [c]lient [p]eers [r]estart [l]ogs [?]help [q]uit   |
++--------------------------------------------------------------+
+```
+
+### CLI (non-interactive)
+
+```bash
+# 1. Set up the server
+sudo ironguard-tui setup
+
+# 2. Create clients (auto-generates keys, assigns IP, adds peer to server)
+sudo ironguard-tui client create laptop --endpoint=vpn.example.com:51820
+sudo ironguard-tui client create phone  --endpoint=vpn.example.com:51820
+
+# 3. Start the server
+sudo ironguard-tui start
+
+# 4. Copy client folder to device and connect
+scp -r /etc/ironguard/clients/laptop/ user@laptop:~/ironguard/
+# On the client:
+cd ~/ironguard && sudo ironguard up utun10 -c wg.json -f
+```
+
+### Server Commands
+
+```bash
+ironguard-tui start              # start the server
+ironguard-tui stop               # stop the server
+ironguard-tui restart            # restart (picks up config changes)
+ironguard-tui status             # show running state + peer count
+ironguard-tui logs               # tail server logs
+ironguard-tui peers              # list all configured peers
+ironguard-tui server-key         # print server public key
+```
+
+### Client Commands
+
+```bash
+ironguard-tui client create <name>   # generate keys + config, add to server
+ironguard-tui client list            # list all clients with IPs
+ironguard-tui client show <name>     # show client details + config
+ironguard-tui client remove <name>   # remove client + peer from server
+```
+
+Each `client create` generates keys, picks the next available IP (10.0.0.2, .3, .4...), writes a ready-to-use `wg.json`, and adds the peer to the server config. After adding or removing clients, run `restart` to apply.
+
+### Setup Options
+
+```bash
+# Custom interface, port, IP
+sudo ironguard-tui setup --interface=wg0 --port=51820 --ip=10.0.0.1
+
+# Build the TUI itself
+cargo build -p ironguard-tui --release
+```
+
+Setup auto-detects Linux vs macOS and:
+- Generates server keys in `/etc/ironguard/keys/`
+- Creates `/etc/ironguard/wg.json` with empty peer list
+- Registers a system service (systemd on Linux, launchd on macOS)
+- Configures firewall rules and IP forwarding
+
+
+## Project Map
+
+```
+ironguard/
+  Cargo.toml                    # Workspace root (6 crates)
+  crates/
+    ironguard-core/             # Pure WireGuard protocol (generic over platform traits)
+      src/
+        device.rs               #   WireGuard<T,B> top-level device orchestration
+        workers.rs              #   Async tun/udp/handshake worker loops
+        timers.rs               #   5 per-peer WireGuard deadline timers
+        peer.rs                 #   Per-peer state, stats, handshake bookkeeping
+        queue.rs                #   Bounded parallel handshake work queue
+        types.rs                #   StaticSecret, PublicKey, KeyPair wrappers
+        constants.rs            #   Protocol constants (sizes, timeouts)
+        handshake/
+          device.rs             #     Handshake device (DashMap receiver-ID lookup)
+          noise.rs              #     Noise_IKpsk2 core functions (snow)
+          macs.rs               #     MAC1/MAC2/cookie DoS mitigation
+          ratelimiter.rs        #     Per-IP token bucket (20 pkt/s)
+          messages.rs           #     Handshake message structs
+          peer.rs               #     Per-peer handshake state
+          timestamp.rs          #     TAI64N replay prevention
+          pq.rs                 #     ML-KEM-768 hybrid key exchange (pq feature)
+        router/
+          device.rs             #     DeviceHandle: treebitmap IPv4+IPv6 LPM tables
+          peer.rs               #     KeyWheel (next/current/previous) + AntiReplay
+          send.rs               #     Outbound: TUN -> AES-256-GCM encrypt -> UDP
+          receive.rs            #     Inbound: UDP -> decrypt -> TUN
+          route.rs              #     IP routing table wrapper
+          anti_replay.rs        #     RFC 6479 2048-bit sliding window
+          messages_v2.rs        #     v2 16-byte FrameHeader (types 0x04-0x07)
+          messages.rs           #     Legacy transport message structs
+          queue.rs              #     Staged packet queue per peer
+          types.rs              #     Callbacks trait (decouples router from timers)
+          tests.rs              #     Router unit tests
+        pipeline/
+          pool.rs               #     Two-tier buffer pool (8192x2KB + 128x64KB)
+          batch.rs              #     BatchAccumulator (count/size/timeout flush)
+          io.rs                 #     TransportIo trait (batch send/receive)
+          reorder.rs            #     Per-peer reorder buffer (BTreeMap, window=256)
+        session/
+          keys.rs               #     HKDF-SHA256 epoch-based key derivation
+          state.rs              #     SessionState machine (Idle/Stable/Rekeying/Migrating)
+          quic.rs               #     QUIC-based session setup (quic feature)
+          manager.rs            #     SessionManager per-peer QUIC sessions (quic feature)
+          tasks.rs              #     Async session tasks (rekey, migration)
+      benches/
+        pipeline.rs             #   Criterion benchmarks
+
+    ironguard-platform/         # OS I/O abstractions
+      src/
+        tun.rs                  #   Tun trait (Reader, Writer, Status)
+        udp.rs                  #   Udp trait (UdpReader, UdpWriter)
+        endpoint.rs             #   Endpoint trait
+        capabilities.rs         #   PlatformCapabilities (sendmmsg, GSO, multi-queue)
+        quic.rs                 #   QUIC transport backend (quic feature)
+        macos/
+          tun.rs                #     macOS utun via tun-rs
+          udp.rs                #     macOS UDP with sendmsg_x/recvmsg_x
+          darwin_batch.rs       #     Darwin batch I/O FFI syscalls
+          endpoint.rs           #     MacosEndpoint
+        linux/
+          tun.rs                #     Linux TUN via tun-rs
+          udp.rs                #     Linux UDP with sendmmsg/recvmmsg + GSO/GRO
+          endpoint.rs           #     LinuxEndpoint
+        dummy/
+          tun.rs                #     In-memory TUN for testing
+          udp.rs                #     In-memory UDP for testing
+
+    ironguard-connect/          # NAT traversal & connectivity
+      src/
+        stun.rs                 #   STUN binding requests (NAT detection)
+        holepunch.rs            #   Coordinated UDP hole punching
+        birthday.rs             #   Birthday paradox spray (symmetric NAT)
+        portmap.rs              #   UPnP port mapping (igd-next)
+        netcheck.rs             #   Network type detection
+        candidate.rs            #   Ranked connection candidates
+        manager.rs              #   ConnectionManager orchestrating all strategies
+        discovery/
+          mdns.rs               #     mDNS LAN auto-discovery
+          local.rs              #     Local network scanning
+          subnet.rs             #     Subnet-based peer search
+        relay/
+          server.rs             #     QUIC-based relay server
+          client.rs             #     QUIC-based relay client
+          protocol.rs           #     Relay wire protocol messages
+
+    ironguard-config/           # Configuration layer
+      src/
+        types.rs                #   Config, InterfaceConfig, PeerConfig structs
+        keys.rs                 #   Key loading from file/env (hex + base64)
+        conf.rs                 #   WireGuard .conf <-> wg.json conversion
+        validate.rs             #   Semantic config validation
+      tests/
+        config_to_core.rs       #   JSON round-trip + import/export tests
+
+    ironguard-cli/              # CLI binary
+      src/
+        main.rs                 #   clap CLI: up/down/status/genkey/pubkey/import/export
+
+    ironguard-tui/              # TUI manager (ratatui + crossterm)
+      src/
+        main.rs                 #   Dual-mode: interactive TUI or CLI subcommands
+        app.rs                  #   App state machine (screens, data, transitions)
+        tui.rs                  #   Terminal setup/teardown, main render loop
+        event.rs                #   Key event handling + action dispatch
+        ui/
+          dashboard.rs          #     Main dashboard: status + peers + log + keybindings
+          setup.rs              #     Step-by-step setup wizard with progress bar
+          clients.rs            #     Client create form + client list table
+          logs.rs               #     Scrollable log viewer
+          help.rs               #     Keybinding reference
+        actions/
+          server.rs             #     Start/stop/restart (systemd or launchd)
+          config.rs             #     Config CRUD: peers, clients, server settings
+          keys.rs               #     X25519 key generation + derivation
+          system.rs             #     OS detection, service install, firewall, IP forwarding
+          setup.rs              #     Non-interactive setup flow
+
+  configs/                      # Example configurations
+    server-wg.json              #   Server config (utun9, port 51820)
+    client-wg.json              #   Client config (utun10, port 51830)
+
+  scripts/
+    install.sh                  # curl-pipe-bash installer (Linux + macOS)
+    deploy-ai.sh                # Remote deploy + test script
+    ironguard-ctl               # Bash fallback (same commands as ironguard-tui)
+
+  .github/workflows/
+    ci.yml                      # CI: build + test + clippy + fmt (Linux + macOS)
+    release.yml                 # Release: 4-platform builds + GitHub release + Homebrew
+```
 
 ## Development
 

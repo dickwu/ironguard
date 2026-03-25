@@ -6,11 +6,12 @@ members = [
     "crates/ironguard-config",
     "crates/ironguard-connect",
     "crates/ironguard-cli",
+    "crates/ironguard-tui",
 ]
 
 [workspace.package]
 edition = "2024"
-version = "0.2.1"
+version = "0.2.2"
 license = "GPL-3.0-or-later"
 rust-version = "1.85"
 
@@ -54,3 +55,6 @@ igd-next = "0.15"
 mdns-sd = "0.12"
 hmac = "0.12"
 sha2 = "0.10"
+ratatui = "0.29"
+crossterm = "0.28"
+chrono = "0.4"
