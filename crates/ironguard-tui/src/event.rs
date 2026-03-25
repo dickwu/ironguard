@@ -32,6 +32,7 @@ pub fn handle_events(app: &mut App) -> Result<bool> {
         Screen::Logs => handle_logs(app, key.code),
         Screen::ClientList => handle_client_list(app, key.code),
         Screen::ClientCreate => handle_client_create(app, key.code),
+        Screen::Service => handle_service(app, key.code),
         Screen::Confirm(_) => handle_confirm(app, key.code),
         Screen::Setup(_) => handle_setup(app, key.code),
     }
@@ -52,6 +53,10 @@ fn handle_dashboard(app: &mut App, key: KeyCode) {
         }
         KeyCode::Char('p') => app.go_to(Screen::ClientList),
         KeyCode::Char('s') => app.go_to(Screen::Setup(SetupPhase::Welcome)),
+        KeyCode::Char('d') => {
+            app.refresh_service();
+            app.go_to(Screen::Service);
+        }
         KeyCode::Char('r') => {
             if app.server_running {
                 app.go_to(Screen::Confirm(ConfirmAction::Restart));
@@ -153,6 +158,57 @@ fn current_input_field(app: &mut App) -> &mut String {
         &mut app.input_name
     } else {
         &mut app.input_endpoint
+    }
+}
+
+fn handle_service(app: &mut App, key: KeyCode) {
+    match key {
+        KeyCode::Esc | KeyCode::Char('q') => app.go_back(),
+        KeyCode::Char('i') => {
+            match actions::system::install_service(&app.sys, &app.interface) {
+                Ok(()) => {
+                    app.push_service_log("Service installed.");
+                    app.push_log("Service installed.");
+                }
+                Err(e) => app.push_service_log(&format!("Install error: {e}")),
+            }
+            app.refresh_service();
+        }
+        KeyCode::Char('e') => {
+            match actions::system::enable_service(&app.sys, &app.interface) {
+                Ok(msg) => {
+                    app.push_service_log(&msg);
+                    app.push_log(&msg);
+                }
+                Err(e) => app.push_service_log(&format!("Enable error: {e}")),
+            }
+            app.refresh_service();
+        }
+        KeyCode::Char('d') => {
+            match actions::system::disable_service(&app.sys, &app.interface) {
+                Ok(msg) => {
+                    app.push_service_log(&msg);
+                    app.push_log(&msg);
+                }
+                Err(e) => app.push_service_log(&format!("Disable error: {e}")),
+            }
+            app.refresh_service();
+        }
+        KeyCode::Char('u') => {
+            match actions::system::uninstall_service(&app.sys, &app.interface) {
+                Ok(msg) => {
+                    app.push_service_log(&msg);
+                    app.push_log(&msg);
+                }
+                Err(e) => app.push_service_log(&format!("Uninstall error: {e}")),
+            }
+            app.refresh_service();
+        }
+        KeyCode::Char('f') => {
+            app.refresh_service();
+            app.push_service_log("Status refreshed.");
+        }
+        _ => {}
     }
 }
 

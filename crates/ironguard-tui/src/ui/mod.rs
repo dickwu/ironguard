@@ -2,6 +2,7 @@ mod clients;
 mod dashboard;
 mod help;
 mod logs;
+mod service;
 mod setup;
 
 use ratatui::prelude::*;
@@ -14,6 +15,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         Screen::Setup(_) => setup::render(frame, app),
         Screen::ClientCreate => clients::render_create(frame, app),
         Screen::ClientList => clients::render_list(frame, app),
+        Screen::Service => service::render(frame, app),
         Screen::Logs => logs::render(frame, app),
         Screen::Help => help::render(frame, app),
         Screen::Confirm(action) => {

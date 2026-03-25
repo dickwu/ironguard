@@ -177,6 +177,8 @@ fn render_keys(frame: &mut Frame, app: &App, area: Rect) {
         Span::raw("lient  "),
         Span::styled("[p]", Style::default().fg(Color::Yellow)),
         Span::raw("eers  "),
+        Span::styled("[d]", Style::default().fg(Color::Yellow)),
+        Span::raw("aemon  "),
         Span::styled(
             format!("[{}]", &run_key[1..2]),
             Style::default().fg(Color::Yellow),

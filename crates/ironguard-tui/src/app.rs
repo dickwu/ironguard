@@ -6,6 +6,7 @@ pub enum Screen {
     Setup(SetupPhase),
     ClientCreate,
     ClientList,
+    Service,
     Logs,
     Help,
     Confirm(ConfirmAction),
@@ -71,6 +72,10 @@ pub struct App {
     // setup
     pub setup_log: Vec<String>,
 
+    // service manager
+    pub service_info: Option<actions::system::ServiceInfo>,
+    pub service_log: Vec<String>,
+
     // status message (bottom bar)
     pub status_msg: String,
 
@@ -100,6 +105,8 @@ impl App {
             input_endpoint: String::new(),
             input_field: 0,
             setup_log: Vec::new(),
+            service_info: None,
+            service_log: Vec::new(),
             status_msg: String::new(),
             sys,
         }
@@ -166,6 +173,16 @@ impl App {
 
     pub fn set_status(&mut self, msg: &str) {
         self.status_msg = msg.to_owned();
+    }
+
+    pub fn refresh_service(&mut self) {
+        self.service_info =
+            Some(actions::system::service_status(&self.sys, &self.interface));
+    }
+
+    pub fn push_service_log(&mut self, msg: &str) {
+        let ts = chrono::Local::now().format("%H:%M:%S").to_string();
+        self.service_log.push(format!("[{ts}] {msg}"));
     }
 
     pub fn go_to(&mut self, screen: Screen) {
