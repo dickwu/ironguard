@@ -1,6 +1,56 @@
 use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand};
 
+// ---------------------------------------------------------------------------
+// Privilege elevation (macOS / Linux)
+// ---------------------------------------------------------------------------
+
+/// Returns `true` if the current process is running as root (uid 0).
+#[cfg(unix)]
+fn is_root() -> bool {
+    // SAFETY: getuid() is always safe to call, no arguments.
+    unsafe { libc::getuid() == 0 }
+}
+
+/// Re-executes the current binary under `sudo`, preserving arguments and
+/// select environment variables (`RUST_LOG`). Does **not** return on success
+/// — the current process is replaced. Returns an error only if `sudo` itself
+/// cannot be launched.
+#[cfg(unix)]
+fn elevate_with_sudo() -> Result<()> {
+    let exe =
+        std::env::current_exe().map_err(|e| anyhow!("cannot determine executable path: {e}"))?;
+
+    let args: Vec<String> = std::env::args().skip(1).collect();
+
+    let mut cmd = std::process::Command::new("sudo");
+
+    // Forward RUST_LOG so tracing keeps working under sudo.
+    if let Ok(rust_log) = std::env::var("RUST_LOG") {
+        cmd.arg(format!("RUST_LOG={rust_log}"));
+    }
+
+    cmd.arg(&exe);
+    cmd.args(&args);
+
+    // Replace this process with the sudo'd version (Unix execvp).
+    use std::os::unix::process::CommandExt;
+    let err = cmd.exec();
+    Err(anyhow!("failed to exec sudo: {err}"))
+}
+
+/// Ensures the process is running as root. If not, prints a notice and
+/// re-executes itself via `sudo`. The `command` argument is used only for
+/// the user-facing message (e.g. "up", "down").
+#[cfg(unix)]
+fn ensure_root(command: &str) -> Result<()> {
+    if is_root() {
+        return Ok(());
+    }
+    eprintln!("ironguard {command} requires root privileges, re-running with sudo...");
+    elevate_with_sudo()
+}
+
 #[derive(Parser)]
 #[command(
     name = "ironguard",
@@ -164,6 +214,8 @@ async fn main() -> Result<()> {
 
 #[cfg(target_os = "macos")]
 async fn cmd_up(interface: &str, config_path: &str, foreground: bool) -> Result<()> {
+    ensure_root("up")?;
+
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
@@ -445,6 +497,8 @@ async fn cmd_up_quic(
 
 #[cfg(not(target_os = "macos"))]
 async fn cmd_up(interface: &str, config_path: &str, foreground: bool) -> Result<()> {
+    ensure_root("up")?;
+
     let content = std::fs::read_to_string(config_path)
         .map_err(|e| anyhow!("failed to read config file {config_path}: {e}"))?;
     let cfg: ironguard_config::Config = serde_json::from_str(&content)
@@ -685,6 +739,8 @@ fn remove_pid_file(interface: &str) {
 }
 
 fn cmd_down(interface: &str) -> Result<()> {
+    ensure_root("down")?;
+
     let path = pid_file_path(interface);
     let pid_str = std::fs::read_to_string(&path).map_err(|_| {
         anyhow!(
@@ -743,6 +799,8 @@ fn cmd_down(interface: &str) -> Result<()> {
 /// 5. Bind raw UDP for the data plane and start pipeline workers.
 #[cfg(all(target_os = "macos", feature = "quic"))]
 async fn cmd_up_v2(interface: &str, config_path: &str, foreground: bool) -> Result<()> {
+    ensure_root("up-v2")?;
+
     use std::net::SocketAddr;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
@@ -1003,6 +1061,8 @@ async fn cmd_up_v2(interface: &str, config_path: &str, foreground: bool) -> Resu
 /// Linux v2 startup path — uses SessionManager for QUIC-based key exchange.
 #[cfg(all(target_os = "linux", feature = "quic"))]
 async fn cmd_up_v2(interface: &str, config_path: &str, foreground: bool) -> Result<()> {
+    ensure_root("up-v2")?;
+
     use std::net::SocketAddr;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
