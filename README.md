@@ -64,7 +64,7 @@ ironguard/
 curl -fsSL https://raw.githubusercontent.com/dickwu/ironguard/main/scripts/install.sh | sudo bash
 ```
 
-Detects your OS and architecture, downloads the latest release, installs both `ironguard` and `ironguard-tui` to `/usr/local/bin/`. Supports `--version=v0.2.3` and `--dir=/custom/path`.
+Detects your OS and architecture, downloads the latest release, installs both `ironguard` and `ironguard-tui` to `/usr/local/bin/`. Supports `--version=v0.2.4` and `--dir=/custom/path`.
 
 ### Homebrew (macOS)
 
