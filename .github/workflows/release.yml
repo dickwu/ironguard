@@ -76,12 +76,90 @@ jobs:
         with:
           path: artifacts
 
-      - name: Create release
+      - name: Upload release assets
         env:
           GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ github.ref_name }}
         run: |
-          gh release create "$TAG_NAME" \
-            --title "$TAG_NAME" \
-            --generate-notes \
-            artifacts/**/*.tar.gz
+          if gh release view "$TAG_NAME" &>/dev/null; then
+            gh release upload "$TAG_NAME" artifacts/**/*.tar.gz --clobber
+          else
+            gh release create "$TAG_NAME" \
+              --title "$TAG_NAME" \
+              --generate-notes \
+              artifacts/**/*.tar.gz
+          fi
+
+  update-homebrew:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Compute SHA256 hashes
+        id: hashes
+        run: |
+          echo "macos_aarch64=$(sha256sum artifacts/ironguard-macos-aarch64/ironguard-macos-aarch64.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "macos_x86_64=$(sha256sum artifacts/ironguard-macos-x86_64/ironguard-macos-x86_64.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "linux_aarch64=$(sha256sum artifacts/ironguard-linux-aarch64/ironguard-linux-aarch64.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "linux_x86_64=$(sha256sum artifacts/ironguard-linux-x86_64/ironguard-linux-x86_64.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Update Homebrew formula
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+          SHA_MACOS_AARCH64: ${{ steps.hashes.outputs.macos_aarch64 }}
+          SHA_MACOS_X86_64: ${{ steps.hashes.outputs.macos_x86_64 }}
+          SHA_LINUX_AARCH64: ${{ steps.hashes.outputs.linux_aarch64 }}
+          SHA_LINUX_X86_64: ${{ steps.hashes.outputs.linux_x86_64 }}
+        run: |
+          VERSION="${TAG_NAME#v}"
+
+          FORMULA="class Ironguard < Formula
+            desc \"Modern cross-platform WireGuard implementation in Rust\"
+            homepage \"https://github.com/dickwu/ironguard\"
+            version \"${VERSION}\"
+            license \"GPL-3.0-or-later\"
+
+            on_macos do
+              on_arm do
+                url \"https://github.com/dickwu/ironguard/releases/download/v#{version}/ironguard-macos-aarch64.tar.gz\"
+                sha256 \"${SHA_MACOS_AARCH64}\"
+              end
+
+              on_intel do
+                url \"https://github.com/dickwu/ironguard/releases/download/v#{version}/ironguard-macos-x86_64.tar.gz\"
+                sha256 \"${SHA_MACOS_X86_64}\"
+              end
+            end
+
+            on_linux do
+              on_arm do
+                url \"https://github.com/dickwu/ironguard/releases/download/v#{version}/ironguard-linux-aarch64.tar.gz\"
+                sha256 \"${SHA_LINUX_AARCH64}\"
+              end
+
+              on_intel do
+                url \"https://github.com/dickwu/ironguard/releases/download/v#{version}/ironguard-linux-x86_64.tar.gz\"
+                sha256 \"${SHA_LINUX_X86_64}\"
+              end
+            end
+
+            def install
+              bin.install \"ironguard\"
+            end
+
+            test do
+              assert_match version.to_s, shell_output(\"#{bin}/ironguard --version\")
+            end
+          end"
+
+          EXISTING=$(gh api repos/dickwu/homebrew-tap/contents/Formula/ironguard.rb --jq '.sha')
+
+          gh api repos/dickwu/homebrew-tap/contents/Formula/ironguard.rb \
+            -X PUT \
+            -f message="chore: update ironguard to ${VERSION}" \
+            -f content="$(printf '%s' "$FORMULA" | base64 -w0)" \
+            -f sha="$EXISTING"
