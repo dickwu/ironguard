@@ -143,7 +143,8 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> Sequential
                         .load(core::sync::atomic::Ordering::Acquire);
                     if enabled && ready {
                         let ep_addr = ep.to_address();
-                        let result = job.peer
+                        let result = job
+                            .peer
                             .device
                             .udp_write_tx
                             .try_send((wire_msg.to_vec(), ep));

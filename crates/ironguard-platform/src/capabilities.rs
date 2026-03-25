@@ -88,7 +88,7 @@ impl PlatformCapabilities {
         // On Linux amd64: 0x800454D2
         const TUNGETIFF: libc::c_ulong = 0x800454D2;
 
-        let fd = unsafe { libc::open(b"/dev/net/tun\0".as_ptr() as *const _, libc::O_RDWR) };
+        let fd = unsafe { libc::open(c"/dev/net/tun".as_ptr(), libc::O_RDWR) };
         if fd < 0 {
             return false;
         }

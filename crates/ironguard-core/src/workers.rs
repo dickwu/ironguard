@@ -259,10 +259,7 @@ pub async fn handshake_worker<T: tun::Tun, B: udp::Udp>(
 /// 3. Write all collected packets in a tight loop.
 ///
 /// Runs as a Tokio task. Exits when the channel sender is dropped.
-pub async fn tun_write_worker<W: tun::Writer>(
-    mut rx: mpsc::Receiver<Vec<u8>>,
-    writer: W,
-) {
+pub async fn tun_write_worker<W: tun::Writer>(mut rx: mpsc::Receiver<Vec<u8>>, writer: W) {
     let mut batch: Vec<Vec<u8>> = Vec::with_capacity(DEFAULT_BATCH_MAX_COUNT);
 
     loop {

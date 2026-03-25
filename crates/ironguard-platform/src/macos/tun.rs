@@ -102,10 +102,7 @@ impl tun::Writer for MacosTunWriter {
         loop {
             let mut guard = self.inner.writable().await?;
             match guard.try_io(|fd| {
-                let iov = [
-                    io::IoSlice::new(&af_bytes),
-                    io::IoSlice::new(src),
-                ];
+                let iov = [io::IoSlice::new(&af_bytes), io::IoSlice::new(src)];
                 let n = unsafe {
                     libc::writev(
                         fd.get_ref().as_raw_fd(),

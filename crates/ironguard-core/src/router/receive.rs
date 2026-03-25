@@ -128,12 +128,10 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> ParallelJo
 
                 // check crypto-key router (allowed IPs for source)
                 // keepalive packets (only tag, no payload) are always allowed
-                let route_ok = packet.len() == SIZE_TAG || peer.device.table.check_route(peer, packet);
+                let route_ok =
+                    packet.len() == SIZE_TAG || peer.device.table.check_route(peer, packet);
                 if !route_ok {
-                    tracing::debug!(
-                        packet_len = packet.len(),
-                        "recv_job: route check failed"
-                    );
+                    tracing::debug!(packet_len = packet.len(), "recv_job: route check failed");
                 }
                 route_ok
             })();

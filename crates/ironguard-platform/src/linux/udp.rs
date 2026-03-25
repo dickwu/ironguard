@@ -217,10 +217,10 @@ pub fn recv_batch(
     let mut iovecs: Vec<libc::iovec> = Vec::with_capacity(count);
     let mut msghdrs: Vec<libc::mmsghdr> = Vec::with_capacity(count);
 
-    for i in 0..count {
+    for buf in &mut bufs[..count] {
         iovecs.push(libc::iovec {
-            iov_base: bufs[i].as_mut_ptr() as *mut libc::c_void,
-            iov_len: bufs[i].len(),
+            iov_base: buf.as_mut_ptr() as *mut libc::c_void,
+            iov_len: buf.len(),
         });
     }
 

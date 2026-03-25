@@ -167,9 +167,7 @@ impl ConnectionManager {
         match self.gather_upnp_candidates().await {
             Ok(upnp_candidates) => candidates.extend(upnp_candidates),
             Err(e) => {
-                tracing::debug!(
-                    "UPnP port mapping unavailable (non-critical): {e}"
-                );
+                tracing::debug!("UPnP port mapping unavailable (non-critical): {e}");
             }
         }
 
@@ -252,9 +250,7 @@ impl ConnectionManager {
             }
         }
 
-        Err(TryConnectError::AllCandidatesFailed(
-            peer_candidates.len(),
-        ))
+        Err(TryConnectError::AllCandidatesFailed(peer_candidates.len()))
     }
 
     /// Cleans up UPnP port mappings on shutdown.
@@ -318,9 +314,7 @@ impl ConnectionManager {
     }
 
     /// Attempts UPnP port mapping to get a PortMapped candidate.
-    async fn gather_upnp_candidates(
-        &self,
-    ) -> Result<Vec<Candidate>, crate::portmap::PortmapError> {
+    async fn gather_upnp_candidates(&self) -> Result<Vec<Candidate>, crate::portmap::PortmapError> {
         let external_addr = self
             .port_mapper
             .try_upnp_mapping(self.config.listen_port)
@@ -375,10 +369,7 @@ pub enum TryConnectError {
 }
 
 /// Probes a single candidate address with a UDP round-trip.
-async fn probe_candidate(
-    addr: SocketAddr,
-    timeout: Duration,
-) -> Result<(), std::io::Error> {
+async fn probe_candidate(addr: SocketAddr, timeout: Duration) -> Result<(), std::io::Error> {
     tokio::task::spawn_blocking(move || {
         let sock = std::net::UdpSocket::bind("0.0.0.0:0")?;
         sock.set_read_timeout(Some(timeout))?;
@@ -603,10 +594,7 @@ mod tests {
         let manager = ConnectionManager::with_defaults();
         let result = manager.try_connect(&[]).await;
         assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            TryConnectError::NoCandidates
-        ));
+        assert!(matches!(result.unwrap_err(), TryConnectError::NoCandidates));
     }
 
     #[tokio::test]

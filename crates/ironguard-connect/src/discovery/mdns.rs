@@ -13,7 +13,7 @@ use std::sync::Arc;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use thiserror::Error;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -91,8 +91,8 @@ impl MdnsDiscovery {
         let ephemeral_id = compute_ephemeral_id(pubkey, salt);
         let id_hex = hex::encode(ephemeral_id);
 
-        let daemon = mdns_sd::ServiceDaemon::new()
-            .map_err(|e| MdnsError::DaemonError(e.to_string()))?;
+        let daemon =
+            mdns_sd::ServiceDaemon::new().map_err(|e| MdnsError::DaemonError(e.to_string()))?;
 
         // Build properties map
         let properties: Vec<(&str, &str)> = vec![("id", &id_hex)];
@@ -104,7 +104,7 @@ impl MdnsDiscovery {
             SERVICE_TYPE,
             &instance_name,
             &hostname,
-            "",     // Let mdns-sd discover local IPs
+            "", // Let mdns-sd discover local IPs
             port,
             &properties[..],
         )
@@ -204,8 +204,7 @@ impl MdnsDiscovery {
                         // Match against known pubkeys
                         if let Some(pubkey) = expected_ids.get(&received_id) {
                             for addr in info.get_addresses() {
-                                let sock_addr =
-                                    SocketAddr::new(*addr, info.get_port());
+                                let sock_addr = SocketAddr::new(*addr, info.get_port());
 
                                 tracing::info!(
                                     "mDNS: discovered peer at {} (pubkey match)",

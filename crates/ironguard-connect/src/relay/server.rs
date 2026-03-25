@@ -95,9 +95,7 @@ impl RelayServer {
 
             let peer_count = self.peers.read().await.len();
             if peer_count >= MAX_CONNECTIONS {
-                tracing::warn!(
-                    "relay at capacity ({MAX_CONNECTIONS} connections), rejecting"
-                );
+                tracing::warn!("relay at capacity ({MAX_CONNECTIONS} connections), rejecting");
                 incoming.refuse();
                 continue;
             }
@@ -108,9 +106,7 @@ impl RelayServer {
                     Ok(connection) => {
                         let remote = connection.remote_address();
                         tracing::debug!("relay: new connection from {remote}");
-                        if let Err(e) =
-                            handle_connection(connection, peers).await
-                        {
+                        if let Err(e) = handle_connection(connection, peers).await {
                             tracing::debug!("relay: connection from {remote} ended: {e}");
                         }
                     }
@@ -187,7 +183,10 @@ async fn handle_connection(
     if let Some(token) = &registered_token {
         let mut peers_guard = peers.write().await;
         peers_guard.remove(token);
-        tracing::debug!("relay: unregistered peer {remote} (token={}...)", &token[..8.min(token.len())]);
+        tracing::debug!(
+            "relay: unregistered peer {remote} (token={}...)",
+            &token[..8.min(token.len())]
+        );
     }
 
     Ok(())
@@ -331,11 +330,8 @@ fn create_server_endpoint(bind_addr: SocketAddr) -> Result<Endpoint, RelayServer
     let cert_der = rustls::pki_types::CertificateDer::from(cert.cert);
     let key_der = rustls::pki_types::PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
 
-    let mut server_config = quinn::ServerConfig::with_single_cert(
-        vec![cert_der],
-        key_der.into(),
-    )
-    .map_err(|e| RelayServerError::TlsError(e.to_string()))?;
+    let mut server_config = quinn::ServerConfig::with_single_cert(vec![cert_der], key_der.into())
+        .map_err(|e| RelayServerError::TlsError(e.to_string()))?;
 
     // Configure transport
     let transport = Arc::new(quinn::TransportConfig::default());

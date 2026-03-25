@@ -103,15 +103,14 @@ impl HolePuncher {
 
         // Run the blocking hole punch in a spawn_blocking context
         // since UDP socket operations are synchronous.
-        let result = tokio::task::spawn_blocking(move || {
-            punch_blocking(local_addr, remote_addr, timeout)
-        })
-        .await
-        .map_err(|e| {
-            HolepunchError::SocketError(std::io::Error::other(
-                format!("punch task failed: {e}"),
-            ))
-        })??;
+        let result =
+            tokio::task::spawn_blocking(move || punch_blocking(local_addr, remote_addr, timeout))
+                .await
+                .map_err(|e| {
+                    HolepunchError::SocketError(std::io::Error::other(format!(
+                        "punch task failed: {e}"
+                    )))
+                })??;
 
         Ok(result)
     }
@@ -157,11 +156,7 @@ fn punch_blocking(
             Ok(_) => {
                 send_count += 1;
                 if send_count % 10 == 1 {
-                    tracing::trace!(
-                        "hole punch: sent {} probes to {}",
-                        send_count,
-                        remote_addr
-                    );
+                    tracing::trace!("hole punch: sent {} probes to {}", send_count, remote_addr);
                 }
             }
             Err(e) => {
@@ -191,8 +186,9 @@ fn punch_blocking(
                     });
                 }
             }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock
-                || e.kind() == std::io::ErrorKind::TimedOut =>
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
             {
                 // No response yet, continue punching
             }

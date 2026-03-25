@@ -92,10 +92,7 @@ impl PortMapper {
         .map_err(|e| PortmapError::NoGateway(format!("task failed: {e}")))?
         .map_err(|e| PortmapError::NoGateway(e.to_string()))?;
 
-        tracing::debug!(
-            "found UPnP gateway at {}",
-            gateway.addr
-        );
+        tracing::debug!("found UPnP gateway at {}", gateway.addr);
 
         // Request the port mapping
         let lease_secs = DEFAULT_LEASE_SECS;
@@ -122,11 +119,9 @@ impl PortMapper {
         .map_err(|e| PortmapError::MappingFailed(e.to_string()))?;
 
         // The external address is the gateway's external IP + the mapped port
-        let external_ip = gateway
-            .get_external_ip()
-            .map_err(|e| {
-                PortmapError::UnexpectedResponse(format!("cannot get external IP: {e}"))
-            })?;
+        let external_ip = gateway.get_external_ip().map_err(|e| {
+            PortmapError::UnexpectedResponse(format!("cannot get external IP: {e}"))
+        })?;
         let external_addr = SocketAddr::new(external_ip, external_port);
 
         tracing::info!(
@@ -161,8 +156,7 @@ impl PortMapper {
                     let guard = active.lock().await;
                     match guard.as_ref() {
                         Some(mapping) => {
-                            let secs =
-                                (mapping.lease_secs as f64 * LEASE_REFRESH_RATIO) as u64;
+                            let secs = (mapping.lease_secs as f64 * LEASE_REFRESH_RATIO) as u64;
                             Duration::from_secs(secs.max(60))
                         }
                         None => return,
@@ -180,10 +174,7 @@ impl PortMapper {
                     return;
                 };
 
-                tracing::debug!(
-                    "refreshing UPnP mapping for port {}",
-                    mapping.internal_port
-                );
+                tracing::debug!("refreshing UPnP mapping for port {}", mapping.internal_port);
 
                 match refresh_mapping_once(mapping.internal_port, mapping.lease_secs).await {
                     Ok(()) => {
@@ -229,10 +220,7 @@ impl PortMapper {
             return;
         };
 
-        tracing::debug!(
-            "removing UPnP mapping for port {}",
-            mapping.internal_port
-        );
+        tracing::debug!("removing UPnP mapping for port {}", mapping.internal_port);
 
         let port = mapping.internal_port;
         let result = tokio::task::spawn_blocking(move || {

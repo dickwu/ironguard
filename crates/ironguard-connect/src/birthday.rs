@@ -155,9 +155,7 @@ impl BirthdaySpray {
         })
         .await
         .map_err(|e| {
-            BirthdayError::SocketError(std::io::Error::other(
-                format!("spray task failed: {e}"),
-            ))
+            BirthdayError::SocketError(std::io::Error::other(format!("spray task failed: {e}")))
         })??;
 
         Ok(result)
@@ -322,8 +320,7 @@ fn build_spray_probe(nonce: u64, auth_token: &[u8]) -> [u8; SPRAY_PROBE_SIZE] {
     buf[4..12].copy_from_slice(&nonce.to_le_bytes());
 
     // HMAC the nonce with the auth token
-    let mut mac =
-        HmacSha256::new_from_slice(auth_token).expect("HMAC accepts any key length");
+    let mut mac = HmacSha256::new_from_slice(auth_token).expect("HMAC accepts any key length");
     mac.update(&SPRAY_MAGIC);
     mac.update(&nonce.to_le_bytes());
     let tag = mac.finalize().into_bytes();
@@ -344,8 +341,7 @@ fn is_valid_spray_response(data: &[u8], auth_token: &[u8]) -> bool {
     let nonce = &data[4..12];
     let received_tag = &data[12..28];
 
-    let mut mac =
-        HmacSha256::new_from_slice(auth_token).expect("HMAC accepts any key length");
+    let mut mac = HmacSha256::new_from_slice(auth_token).expect("HMAC accepts any key length");
     mac.update(&SPRAY_MAGIC);
     mac.update(nonce);
     let expected = mac.finalize().into_bytes();
@@ -488,10 +484,18 @@ mod tests {
     async fn test_spray_empty_port_range() {
         let spray = BirthdaySpray::new();
         let result = spray
-            .spray(IpAddr::V4("192.0.2.1".parse().unwrap()), 10, 100..100, b"token")
+            .spray(
+                IpAddr::V4("192.0.2.1".parse().unwrap()),
+                10,
+                100..100,
+                b"token",
+            )
             .await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), BirthdayError::InvalidParams(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            BirthdayError::InvalidParams(_)
+        ));
     }
 
     // Self-spray test: open sockets on localhost and respond to probes.

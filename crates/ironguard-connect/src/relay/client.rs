@@ -238,9 +238,8 @@ impl RelayClient {
 
         match msg {
             RelayMessage::Deliver { data, .. } => {
-                let payload = decode_payload(&data).map_err(|e| {
-                    RelayClientError::ProtocolError(format!("payload decode: {e}"))
-                })?;
+                let payload = decode_payload(&data)
+                    .map_err(|e| RelayClientError::ProtocolError(format!("payload decode: {e}")))?;
                 Ok(payload)
             }
             RelayMessage::Pong { seq } => {

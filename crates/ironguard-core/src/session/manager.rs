@@ -151,7 +151,9 @@ impl SessionManager {
                 .map_err(|e| SessionError::QuicDatagram(format!("connect: {e}")))?,
         )
         .await
-        .map_err(|_| SessionError::QuicDatagram(format!("handshake timeout connecting to {peer_addr}")))?
+        .map_err(|_| {
+            SessionError::QuicDatagram(format!("handshake timeout connecting to {peer_addr}"))
+        })?
         .map_err(|e| SessionError::QuicDatagram(format!("handshake: {e}")))?;
 
         let (keys, peer_init) =

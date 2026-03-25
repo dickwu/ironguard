@@ -144,11 +144,7 @@ impl<T: tun::Tun, B: udp::Udp> WireGuard<T, B> {
         Self::build(writer, handle, None)
     }
 
-    fn build(
-        writer: T::Writer,
-        handle: Handle,
-        owned_runtime: Option<Runtime>,
-    ) -> WireGuard<T, B> {
+    fn build(writer: T::Writer, handle: Handle, owned_runtime: Option<Runtime>) -> WireGuard<T, B> {
         let cpus = num_cpus::get();
 
         // handshake queue

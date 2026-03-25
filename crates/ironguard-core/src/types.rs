@@ -163,10 +163,10 @@ mod tests {
         // Verify the cached AEAD can encrypt
         let mut plaintext = vec![1u8, 2, 3, 4];
         let nonce = Nonce::assume_unique_for_key([0u8; 12]);
-        let result = key
-            .cached_aead
-            .aead
-            .seal_in_place_separate_tag(nonce, Aad::empty(), &mut plaintext);
+        let result =
+            key.cached_aead
+                .aead
+                .seal_in_place_separate_tag(nonce, Aad::empty(), &mut plaintext);
         assert!(result.is_ok());
     }
 }

@@ -395,10 +395,9 @@ impl LinuxTun {
 
         // Register the original fd with READABLE-only interest for readers.
         let read_fd = Arc::new(
-            AsyncFd::with_interest(tun_device, Interest::READABLE | Interest::WRITABLE)
-                .map_err(|e| {
-                    LinuxTunError::Device(format!("AsyncFd creation (reader) failed: {e}"))
-                })?,
+            AsyncFd::with_interest(tun_device, Interest::READABLE | Interest::WRITABLE).map_err(
+                |e| LinuxTunError::Device(format!("AsyncFd creation (reader) failed: {e}")),
+            )?,
         );
 
         // Duplicate the fd for the writer so read and write have independent
