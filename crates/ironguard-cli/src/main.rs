@@ -877,6 +877,9 @@ async fn cmd_up_v2(interface: &str, config_path: &str, foreground: bool) -> Resu
             .to_vec(),
         cert_path: quic_cfg.cert_path.as_ref().map(std::path::PathBuf::from),
         key_path: quic_cfg.key_path.as_ref().map(std::path::PathBuf::from),
+        sni: quic_cfg.sni.clone(),
+        our_certs: Vec::new(),
+        our_key: None,
     };
     let session_mgr = Arc::new(SessionManager::new(session_config));
 
@@ -927,7 +930,7 @@ async fn cmd_up_v2(interface: &str, config_path: &str, foreground: bool) -> Resu
             let quic_addr: SocketAddr = (addr.ip(), quic_port).into();
 
             match session_mgr
-                .connect(pk_bytes, quic_addr, data_port, receiver_id)
+                .connect(pk_bytes, quic_addr, None, data_port, receiver_id)
                 .await
             {
                 Ok(session) => {
@@ -1137,6 +1140,9 @@ async fn cmd_up_v2(interface: &str, config_path: &str, foreground: bool) -> Resu
             .to_vec(),
         cert_path: quic_cfg.cert_path.as_ref().map(std::path::PathBuf::from),
         key_path: quic_cfg.key_path.as_ref().map(std::path::PathBuf::from),
+        sni: quic_cfg.sni.clone(),
+        our_certs: Vec::new(),
+        our_key: None,
     };
     let session_mgr = Arc::new(SessionManager::new(session_config));
 
@@ -1180,7 +1186,7 @@ async fn cmd_up_v2(interface: &str, config_path: &str, foreground: bool) -> Resu
             let quic_addr: SocketAddr = (addr.ip(), quic_port).into();
 
             match session_mgr
-                .connect(pk_bytes, quic_addr, data_port, receiver_id)
+                .connect(pk_bytes, quic_addr, None, data_port, receiver_id)
                 .await
             {
                 Ok(session) => {

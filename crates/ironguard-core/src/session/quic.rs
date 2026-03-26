@@ -53,6 +53,12 @@ pub struct QuicSessionConfig {
     pub cert_path: Option<PathBuf>,
     /// Optional path to the TLS private key (PEM).
     pub key_path: Option<PathBuf>,
+    /// Optional SNI hostname for outbound connections.
+    pub sni: Option<String>,
+    /// This node's TLS certificate chain (DER-encoded). Used for mTLS.
+    pub our_certs: Vec<rustls::pki_types::CertificateDer<'static>>,
+    /// This node's TLS private key (DER-encoded). Used for mTLS.
+    pub our_key: Option<rustls::pki_types::PrivateKeyDer<'static>>,
 }
 
 impl Default for QuicSessionConfig {
@@ -62,6 +68,9 @@ impl Default for QuicSessionConfig {
             alpn: b"ironguard/1".to_vec(),
             cert_path: None,
             key_path: None,
+            sni: None,
+            our_certs: Vec::new(),
+            our_key: None,
         }
     }
 }
@@ -164,6 +173,160 @@ pub fn make_test_client_config() -> quinn::ClientConfig {
     let quic_client_config =
         quinn::crypto::rustls::QuicClientConfig::try_from(tls_config).expect("QUIC client config");
     quinn::ClientConfig::new(Arc::new(quic_client_config))
+}
+
+// ---------------------------------------------------------------------------
+// Production TLS configs — mTLS with cert pinning
+// ---------------------------------------------------------------------------
+
+/// Certificate verifier that accepts only a specific pinned server certificate.
+///
+/// Compares the presented end-entity certificate (DER bytes) against an
+/// expected certificate. All other certificates are rejected. Signature
+/// verification is delegated to the standard `WebPkiServerVerifier` schemes.
+#[derive(Debug)]
+struct PinnedCertVerifier {
+    expected_cert_der: Vec<u8>,
+}
+
+impl rustls::client::danger::ServerCertVerifier for PinnedCertVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        if end_entity.as_ref() == self.expected_cert_der.as_slice() {
+            Ok(rustls::client::danger::ServerCertVerified::assertion())
+        } else {
+            Err(rustls::Error::General(
+                "server certificate does not match pinned peer certificate".into(),
+            ))
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+/// Build a `quinn::ServerConfig` with mTLS — requires clients to present a
+/// certificate. The server verifies client certs against a provided set of
+/// trusted peer certificates.
+///
+/// `our_certs` and `our_key` are this node's TLS identity.
+/// `trusted_client_certs` are the DER-encoded certificates of peers allowed
+/// to connect.
+pub fn make_server_config_mtls(
+    our_certs: Vec<rustls::pki_types::CertificateDer<'static>>,
+    our_key: rustls::pki_types::PrivateKeyDer<'static>,
+    trusted_client_certs: &[rustls::pki_types::CertificateDer<'static>],
+    alpn: &[u8],
+) -> Result<quinn::ServerConfig, SessionError> {
+    // Build a root cert store from the trusted client certificates.
+    let mut root_store = rustls::RootCertStore::empty();
+    for cert in trusted_client_certs {
+        root_store
+            .add(cert.clone())
+            .map_err(|e| SessionError::QuicDatagram(format!("add trusted cert: {e}")))?;
+    }
+
+    let client_verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(root_store))
+        .build()
+        .map_err(|e| SessionError::QuicDatagram(format!("client verifier: {e}")))?;
+
+    let mut server_tls = rustls::ServerConfig::builder()
+        .with_client_cert_verifier(client_verifier)
+        .with_single_cert(our_certs, our_key)
+        .map_err(|e| SessionError::QuicDatagram(format!("server TLS config: {e}")))?;
+
+    server_tls.alpn_protocols = vec![alpn.to_vec()];
+
+    let quic_server_config = quinn::crypto::rustls::QuicServerConfig::try_from(server_tls)
+        .map_err(|e| SessionError::QuicDatagram(format!("QUIC server config: {e}")))?;
+    Ok(quinn::ServerConfig::with_crypto(Arc::new(
+        quic_server_config,
+    )))
+}
+
+/// Build a `quinn::ClientConfig` that pins a specific server certificate
+/// and presents our own certificate for mTLS.
+///
+/// `peer_cert_der` is the expected server certificate (DER bytes).
+/// `our_certs` and `our_key` are this client's TLS identity.
+pub fn make_client_config_pinned(
+    peer_cert_der: &[u8],
+    our_certs: Vec<rustls::pki_types::CertificateDer<'static>>,
+    our_key: rustls::pki_types::PrivateKeyDer<'static>,
+    alpn: &[u8],
+) -> Result<quinn::ClientConfig, SessionError> {
+    let verifier = PinnedCertVerifier {
+        expected_cert_der: peer_cert_der.to_vec(),
+    };
+
+    let mut tls_config = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(verifier))
+        .with_client_auth_cert(our_certs, our_key)
+        .map_err(|e| SessionError::QuicDatagram(format!("client TLS config: {e}")))?;
+
+    tls_config.alpn_protocols = vec![alpn.to_vec()];
+
+    let quic_client_config = quinn::crypto::rustls::QuicClientConfig::try_from(tls_config)
+        .map_err(|e| SessionError::QuicDatagram(format!("QUIC client config: {e}")))?;
+    Ok(quinn::ClientConfig::new(Arc::new(quic_client_config)))
+}
+
+/// Extract the peer's TLS certificate from a QUIC connection (after handshake).
+///
+/// Returns the DER-encoded end-entity certificate, or an error if no peer
+/// certificate was presented (e.g., the peer did not do client auth).
+pub fn extract_peer_cert(connection: &quinn::Connection) -> Result<Vec<u8>, SessionError> {
+    let peer_certs = connection
+        .peer_identity()
+        .and_then(|id| id.downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>().ok())
+        .ok_or_else(|| {
+            SessionError::QuicDatagram("peer did not present a TLS certificate".into())
+        })?;
+
+    peer_certs
+        .first()
+        .map(|cert| cert.as_ref().to_vec())
+        .ok_or_else(|| {
+            SessionError::QuicDatagram("peer certificate chain is empty".into())
+        })
 }
 
 // ---------------------------------------------------------------------------
