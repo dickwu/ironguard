@@ -1,7 +1,5 @@
 pub mod constants;
 pub mod device;
-#[cfg(feature = "legacy-wireguard")]
-pub mod handshake;
 pub mod peer;
 pub mod pipeline;
 pub mod queue;
