@@ -151,10 +151,7 @@ const MAX_RECV_BATCH: usize = 64;
 /// recvmmsg on Linux), falling back to single-packet reads otherwise.
 ///
 /// Runs as a Tokio task. The reader.read() call is async.
-pub async fn udp_worker<T: tun::Tun, B: udp::Udp>(
-    wg: WireGuard<T, B>,
-    reader: B::Reader,
-) {
+pub async fn udp_worker<T: tun::Tun, B: udp::Udp>(wg: WireGuard<T, B>, reader: B::Reader) {
     udp_worker_with_relay(wg, reader, None).await;
 }
 
@@ -398,8 +395,7 @@ mod tests {
         // Read the relayed packet from the UDP output (peer_readers = readers_b).
         let reader = &peer_readers[0];
         let mut buf = vec![0u8; 4096];
-        let result =
-            tokio::time::timeout(Duration::from_millis(1000), reader.read(&mut buf)).await;
+        let result = tokio::time::timeout(Duration::from_millis(1000), reader.read(&mut buf)).await;
 
         assert!(result.is_ok(), "relayed packet should appear on UDP output");
         let (len, endpoint) = result.unwrap().unwrap();

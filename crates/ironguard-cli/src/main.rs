@@ -194,7 +194,12 @@ async fn main() -> Result<()> {
 /// 4. Install the derived keypair into the router.
 /// 5. Bind raw UDP for the data plane and start pipeline workers.
 #[cfg(target_os = "macos")]
-async fn cmd_up(interface: &str, config_path: &str, foreground: bool, mesh_flag: bool) -> Result<()> {
+async fn cmd_up(
+    interface: &str,
+    config_path: &str,
+    foreground: bool,
+    mesh_flag: bool,
+) -> Result<()> {
     ensure_root("up")?;
 
     use std::net::SocketAddr;
@@ -468,7 +473,12 @@ async fn cmd_up(interface: &str, config_path: &str, foreground: bool, mesh_flag:
 
 /// Linux startup path -- uses SessionManager for QUIC-based key exchange.
 #[cfg(target_os = "linux")]
-async fn cmd_up(interface: &str, config_path: &str, foreground: bool, mesh_flag: bool) -> Result<()> {
+async fn cmd_up(
+    interface: &str,
+    config_path: &str,
+    foreground: bool,
+    mesh_flag: bool,
+) -> Result<()> {
     ensure_root("up")?;
 
     use std::net::SocketAddr;
@@ -736,7 +746,12 @@ async fn cmd_up(interface: &str, config_path: &str, foreground: bool, mesh_flag:
 
 /// Fallback for unsupported platforms.
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-async fn cmd_up(_interface: &str, _config_path: &str, _foreground: bool, _mesh_flag: bool) -> Result<()> {
+async fn cmd_up(
+    _interface: &str,
+    _config_path: &str,
+    _foreground: bool,
+    _mesh_flag: bool,
+) -> Result<()> {
     eprintln!("Platform not yet supported");
     Ok(())
 }
