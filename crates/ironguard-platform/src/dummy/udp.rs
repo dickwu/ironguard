@@ -26,6 +26,15 @@ pub struct DummyUdpWriter {
     tx: mpsc::Sender<(Vec<u8>, DummyEndpoint)>,
 }
 
+impl DummyUdpWriter {
+    /// Create a writer that discards all output (useful in tests where
+    /// no outbound UDP is needed).
+    pub fn new_sink() -> Self {
+        let (tx, _rx) = mpsc::channel(1);
+        Self { tx }
+    }
+}
+
 impl udp::UdpWriter<DummyEndpoint> for DummyUdpWriter {
     type Error = DummyUdpError;
     async fn write(&self, buf: &[u8], dst: &mut DummyEndpoint) -> Result<(), Self::Error> {

@@ -161,18 +161,16 @@ impl SessionManager {
                 &self.config.alpn,
             )?,
             _ => {
-                tracing::warn!("QUIC connect: no peer cert or own identity configured — using insecure test mode");
+                tracing::warn!(
+                    "QUIC connect: no peer cert or own identity configured — using insecure test mode"
+                );
                 super::quic::make_test_client_config()
             }
         };
 
         endpoint.set_default_client_config(client_config);
 
-        let sni = self
-            .config
-            .sni
-            .as_deref()
-            .unwrap_or("ironguard");
+        let sni = self.config.sni.as_deref().unwrap_or("ironguard");
 
         let connection = tokio::time::timeout(
             std::time::Duration::from_secs(5),

@@ -1008,4 +1008,3 @@ impl ironguard_core::session::tasks::KeyInstaller for WgKeyInstaller {
         }
     }
 }
-

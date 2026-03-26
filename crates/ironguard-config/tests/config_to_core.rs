@@ -57,6 +57,7 @@ fn test_config_to_device_setup() {
             transport: "udp".to_string(),
             quic: None,
             post_quantum: PostQuantumMode::default(),
+            mesh: None,
             peers: vec![
                 PeerConfig {
                     public_key: pk_a_hex.clone(),
@@ -67,6 +68,8 @@ fn test_config_to_device_setup() {
                     comment: Some("Peer A".to_string()),
                     pq_public_key: None,
                     quic_port: None,
+                    role: None,
+                    relay_for: Vec::new(),
                 },
                 PeerConfig {
                     public_key: pk_b_hex.clone(),
@@ -77,6 +80,8 @@ fn test_config_to_device_setup() {
                     comment: None,
                     pq_public_key: None,
                     quic_port: None,
+                    role: None,
+                    relay_for: Vec::new(),
                 },
             ],
         },
@@ -115,7 +120,11 @@ fn test_config_to_device_setup() {
     let (_, tun_writer, _, _) = dummy_tun::create_pair();
     let wg: TestWireGuard = ironguard_core::device::WireGuard::new(tun_writer);
 
-    // 7. Add peers from config (key exchange now handled by QUIC sessions)
+    // v2: no static key or PSK at device level -- key material is
+    // exchanged via QUIC sessions and installed as keypairs directly.
+    // We still verify that the loaded key bytes are correct (step 3 above).
+
+    // 7. Add peers from config
     for peer_cfg in &iface.peers {
         let pk_bytes = hex::decode(&peer_cfg.public_key).unwrap();
         let mut pk_arr = [0u8; 32];
@@ -123,6 +132,10 @@ fn test_config_to_device_setup() {
         let pk = PublicKey::from_bytes(pk_arr);
 
         assert!(wg.add_peer(pk.clone()), "should add peer successfully");
+
+        // v2: PSK is exchanged during QUIC session setup, not set
+        // directly on the device. Verify loading still works.
+        let _psk = load_preshared_key(peer_cfg).unwrap();
 
         // Add allowed IPs
         let handle = wg.get_peer_handle(&pk).unwrap();
@@ -214,6 +227,9 @@ fn test_conf_import_to_device() {
 
     let (_, tun_writer, _, _) = dummy_tun::create_pair();
     let wg: TestWireGuard = ironguard_core::device::WireGuard::new(tun_writer);
+
+    // v2: no static key at device level -- key material is exchanged
+    // via QUIC sessions. We verified loaded_sk matches above.
 
     // Add peer
     let pk_bytes = hex::decode(&iface.peers[0].public_key).unwrap();

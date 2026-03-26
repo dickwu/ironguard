@@ -644,3 +644,492 @@ async fn test_v2_full_pipeline_bidirectional() {
     assert_eq!(opaque2.send.now(), None, "unexpected send event on peer2");
     assert_eq!(opaque2.recv.now(), None, "unexpected recv event on peer2");
 }
+
+// --- Forwarding helpers ---
+
+/// Create a keypair with custom key bytes and receiver IDs.
+/// This lets us set up multiple independent encrypted links without
+/// receiver-ID collisions.
+fn custom_keypair(
+    initiator: bool,
+    send_bytes: [u8; 32],
+    recv_bytes: [u8; 32],
+    send_id: u32,
+    recv_id: u32,
+) -> KeyPair {
+    let k_send = Key {
+        cached_aead: CachedAeadKey::new(&send_bytes),
+        key: send_bytes,
+        id: send_id,
+    };
+    let k_recv = Key {
+        cached_aead: CachedAeadKey::new(&recv_bytes),
+        key: recv_bytes,
+        id: recv_id,
+    };
+    KeyPair {
+        birth: Instant::now(),
+        initiator,
+        send: k_send,
+        recv: k_recv,
+    }
+}
+
+/// Build keypairs for a link between two routers.
+/// Returns (initiator_keypair, responder_keypair) with matching key material.
+fn make_link_keypairs(
+    key_a: [u8; 32],
+    key_b: [u8; 32],
+    id_a: u32,
+    id_b: u32,
+) -> (KeyPair, KeyPair) {
+    // Initiator: send=key_a/id_a, recv=key_b/id_b
+    let initiator = custom_keypair(true, key_a, key_b, id_a, id_b);
+    // Responder: send=key_b/id_b, recv=key_a/id_a (mirror of initiator)
+    let responder = custom_keypair(false, key_b, key_a, id_b, id_a);
+    (initiator, responder)
+}
+
+use ironguard_platform::tun::Reader as _;
+
+// --- Forwarding tests ---
+
+/// Test that an intermediate node (B) forwards transit traffic to the
+/// correct next-hop peer (C) instead of delivering it to TUN.
+///
+/// Topology: A --[link_ab]--> B --[forward]--> C
+///
+/// A sends a packet with dst=192.168.3.1. B has forwarding enabled with
+/// local_addresses=[192.168.2.1]. B's forwarding table maps 192.168.3.0/24
+/// to peer_b_to_c. The packet should arrive at C, and B should NOT write
+/// to its TUN.
+#[tokio::test]
+async fn test_forwarding_to_next_hop() {
+    // -- Key material for two independent links --
+    // Link A<->B: keys 0x53/0x52, IDs 0x0001/0x0002
+    let (kp_ab_init, kp_ab_resp) = make_link_keypairs([0x53; 32], [0x52; 32], 0x0001, 0x0002);
+    // Link B<->C: keys 0x61/0x62, IDs 0x0003/0x0004
+    let (kp_bc_init, kp_bc_resp) = make_link_keypairs([0x61; 32], [0x62; 32], 0x0003, 0x0004);
+
+    // -- UDP pairs --
+    // Pair 1: A -> B
+    // writer_a (index 1) goes to router A; readers_a (index 3) is where
+    // the test reads A's outbound (tx_a -> rx_a).
+    let (_, udp_ab_writer, _, udp_ab_readers, _, _) = dummy_udp::create_pair();
+
+    // Pair 2: B -> C
+    // writer_b (index 4) goes to router B; readers_b (index 0) is where
+    // the test reads B's outbound (tx_b -> rx_b).
+    let (udp_bc_readers, _, _, _, udp_bc_writer, _) = dummy_udp::create_pair();
+
+    // -- TUN pairs --
+    // For B we need to observe that TUN does NOT receive the forwarded packet.
+    let (_, tun_b_writer, tun_b_readers, _) = dummy_tun::create_pair();
+    // For C we need to observe that TUN DOES receive the forwarded packet.
+    let (_, tun_c_writer, tun_c_readers, _) = dummy_tun::create_pair();
+    // A doesn't need TUN observation.
+    let (_, tun_a_writer, _, _) = dummy_tun::create_pair();
+
+    // -- Create routers --
+    let router_a = make_test_router(tun_a_writer, udp_ab_writer);
+    let router_b = make_test_router(tun_b_writer, udp_bc_writer);
+    let router_c = make_test_router(tun_c_writer, dummy_udp::DummyUdpWriter::new_sink());
+
+    // -- Router A: peer toward B --
+    let opaque_a = Opaque::new();
+    let peer_a_to_b = router_a.new_peer(opaque_a.clone());
+    // A routes 192.168.2.0/24 and 192.168.3.0/24 toward B
+    peer_a_to_b.add_allowed_ip("192.168.2.0".parse().unwrap(), 24);
+    peer_a_to_b.add_allowed_ip("192.168.3.0".parse().unwrap(), 24);
+    peer_a_to_b.set_endpoint(dummy_udp::DummyEndpoint::from_address(
+        "127.0.0.1:1001".parse().unwrap(),
+    ));
+
+    // -- Router B: peer from A, peer toward C --
+    let opaque_b_from_a = Opaque::new();
+    let peer_b_from_a = router_b.new_peer(opaque_b_from_a.clone());
+    // B accepts traffic sourced from A's 192.168.1.0/24
+    peer_b_from_a.add_allowed_ip("192.168.1.0".parse().unwrap(), 24);
+
+    let opaque_b_to_c = Opaque::new();
+    let peer_b_to_c = router_b.new_peer(opaque_b_to_c.clone());
+    // B routes 192.168.3.0/24 toward C (for outbound)
+    peer_b_to_c.add_allowed_ip("192.168.3.0".parse().unwrap(), 24);
+    peer_b_to_c.set_endpoint(dummy_udp::DummyEndpoint::from_address(
+        "127.0.0.1:1002".parse().unwrap(),
+    ));
+
+    // -- Router C: peer from B --
+    let opaque_c = Opaque::new();
+    let peer_c_from_b = router_c.new_peer(opaque_c.clone());
+    // C accepts traffic sourced from 192.168.1.0/24 (forwarded from A through B)
+    peer_c_from_b.add_allowed_ip("192.168.1.0".parse().unwrap(), 24);
+
+    // -- Configure B's forwarding --
+    router_b.set_forwarding_enabled(true);
+    router_b.add_local_address("192.168.2.1".parse().unwrap());
+    router_b.add_forwarding_route("192.168.3.0".parse().unwrap(), 24, &peer_b_to_c);
+
+    // -- Install keypairs --
+
+    // Link A<->B: peer_a_to_b is initiator, peer_b_from_a is responder
+    peer_b_from_a.add_keypair(kp_ab_resp);
+    peer_a_to_b.add_keypair(kp_ab_init);
+
+    // A sends keepalive (initiator auto-sends on keypair add)
+    let send_evt = opaque_a.send.wait(TIMEOUT);
+    assert!(send_evt.is_some(), "A should send keepalive to B");
+
+    // Read keepalive from A, pass to B
+    let reader_ab = &udp_ab_readers[0];
+    let mut buf = vec![0u8; 4096];
+    let (len, from) = reader_ab.read(&mut buf).await.unwrap();
+    buf.truncate(len);
+    router_b
+        .recv(from, buf)
+        .expect("B should process A's keepalive");
+
+    assert!(
+        opaque_b_from_a.recv.wait(TIMEOUT).is_some(),
+        "B should receive A's keepalive"
+    );
+    assert_eq!(
+        opaque_b_from_a.key_confirmed.wait(TIMEOUT),
+        Some(()),
+        "B should confirm A's key"
+    );
+
+    // Link B<->C: peer_b_to_c is initiator, peer_c_from_b is responder
+    peer_c_from_b.add_keypair(kp_bc_resp);
+    peer_b_to_c.add_keypair(kp_bc_init);
+
+    // B sends keepalive to C (initiator auto-sends)
+    let send_evt = opaque_b_to_c.send.wait(TIMEOUT);
+    assert!(send_evt.is_some(), "B should send keepalive to C");
+
+    // Read keepalive from B, pass to C
+    let reader_bc = &udp_bc_readers[0];
+    let mut buf = vec![0u8; 4096];
+    let (len, from) = reader_bc.read(&mut buf).await.unwrap();
+    buf.truncate(len);
+    router_c
+        .recv(from, buf)
+        .expect("C should process B's keepalive");
+
+    assert!(
+        opaque_c.recv.wait(TIMEOUT).is_some(),
+        "C should receive B's keepalive"
+    );
+    assert_eq!(
+        opaque_c.key_confirmed.wait(TIMEOUT),
+        Some(()),
+        "C should confirm B's key"
+    );
+
+    // -- Send a packet from A destined for C's network --
+    let ip_pkt = make_ipv4_packet(
+        "192.168.1.10".parse().unwrap(),
+        "192.168.3.1".parse().unwrap(),
+        50,
+    );
+    router_a
+        .send(pad(&ip_pkt))
+        .expect("A should route toward B");
+
+    // A's send callback fires
+    assert!(
+        opaque_a.send.wait(TIMEOUT).is_some(),
+        "A send event should fire"
+    );
+
+    // Read encrypted packet from A, pass to B
+    let mut buf = vec![0u8; 4096];
+    let (len, from) = reader_ab.read(&mut buf).await.unwrap();
+    buf.truncate(len);
+    router_b
+        .recv(from, buf)
+        .expect("B should process A's data packet");
+
+    // B receives and processes the packet (recv callback fires)
+    assert!(
+        opaque_b_from_a.recv.wait(TIMEOUT).is_some(),
+        "B should fire recv for A's packet"
+    );
+
+    // B forwards: peer_b_to_c.send() triggers send callback
+    assert!(
+        opaque_b_to_c.send.wait(TIMEOUT).is_some(),
+        "B should send forwarded packet toward C"
+    );
+
+    // Read forwarded encrypted packet from B, pass to C
+    let mut buf = vec![0u8; 4096];
+    let (len, from) = reader_bc.read(&mut buf).await.unwrap();
+    buf.truncate(len);
+    router_c
+        .recv(from, buf)
+        .expect("C should process B's forwarded packet");
+
+    // C receives the packet (recv callback fires) and writes to TUN
+    assert!(
+        opaque_c.recv.wait(TIMEOUT).is_some(),
+        "C should fire recv for forwarded packet"
+    );
+
+    // Verify C's TUN received the decrypted packet
+    let tun_reader_c = &tun_c_readers[0];
+    let mut tun_buf = vec![0u8; 4096];
+    let tun_len = tun_reader_c.read(&mut tun_buf, 0).await.unwrap();
+    assert!(tun_len > 0, "C's TUN should receive the decrypted packet");
+    // Verify the destination IP in the delivered packet
+    assert_eq!(tun_buf[16], 192);
+    assert_eq!(tun_buf[17], 168);
+    assert_eq!(tun_buf[18], 3);
+    assert_eq!(tun_buf[19], 1);
+
+    // Verify B's TUN did NOT receive the packet (forwarded, not local)
+    std::thread::sleep(Duration::from_millis(100));
+    let tun_reader_b = &tun_b_readers[0];
+    // Try to read with a very short timeout -- nothing should be there.
+    // We use tokio::time::timeout since the TUN reader blocks.
+    let tun_b_result = tokio::time::timeout(
+        Duration::from_millis(200),
+        tun_reader_b.read(&mut vec![0u8; 4096], 0),
+    )
+    .await;
+    assert!(
+        tun_b_result.is_err(),
+        "B's TUN should NOT receive the forwarded packet"
+    );
+}
+
+/// Test that when forwarding is enabled, packets destined for a local
+/// address are still delivered to TUN (not forwarded).
+///
+/// Same topology as above, but the packet dst=192.168.2.1 matches B's
+/// local_addresses, so B should write to TUN.
+#[tokio::test]
+async fn test_local_delivery_when_forwarding_enabled() {
+    // -- Key material for link A<->B --
+    let (kp_ab_init, kp_ab_resp) = make_link_keypairs([0x53; 32], [0x52; 32], 0x0001, 0x0002);
+
+    // -- UDP pair A -> B --
+    // writer_a (index 1) goes to router A; readers_a (index 3) is where
+    // the test reads A's outbound (tx_a -> rx_a).
+    let (_, udp_ab_writer, _, udp_ab_readers, _, _) = dummy_udp::create_pair();
+
+    // -- TUN for B (we observe it) --
+    let (_, tun_b_writer, tun_b_readers, _) = dummy_tun::create_pair();
+
+    // A doesn't need TUN observation
+    let (_, tun_a_writer, _, _) = dummy_tun::create_pair();
+
+    // -- Create routers --
+    // B gets a sink UDP writer since we don't need outbound in this test
+    let router_a = make_test_router(tun_a_writer, udp_ab_writer);
+    let router_b = make_test_router(tun_b_writer, dummy_udp::DummyUdpWriter::new_sink());
+
+    // -- Router A: peer toward B --
+    let opaque_a = Opaque::new();
+    let peer_a_to_b = router_a.new_peer(opaque_a.clone());
+    peer_a_to_b.add_allowed_ip("192.168.2.0".parse().unwrap(), 24);
+    peer_a_to_b.set_endpoint(dummy_udp::DummyEndpoint::from_address(
+        "127.0.0.1:1001".parse().unwrap(),
+    ));
+
+    // -- Router B: peer from A --
+    let opaque_b = Opaque::new();
+    let peer_b_from_a = router_b.new_peer(opaque_b.clone());
+    peer_b_from_a.add_allowed_ip("192.168.1.0".parse().unwrap(), 24);
+
+    // -- Configure B's forwarding (enabled, but packet is local) --
+    router_b.set_forwarding_enabled(true);
+    router_b.add_local_address("192.168.2.1".parse().unwrap());
+
+    // -- Install keypairs and exchange keepalive --
+    peer_b_from_a.add_keypair(kp_ab_resp);
+    peer_a_to_b.add_keypair(kp_ab_init);
+
+    // A sends keepalive
+    assert!(
+        opaque_a.send.wait(TIMEOUT).is_some(),
+        "A should send keepalive"
+    );
+
+    let reader_ab = &udp_ab_readers[0];
+    let mut buf = vec![0u8; 4096];
+    let (len, from) = reader_ab.read(&mut buf).await.unwrap();
+    buf.truncate(len);
+    router_b
+        .recv(from, buf)
+        .expect("B should process keepalive");
+
+    assert!(
+        opaque_b.recv.wait(TIMEOUT).is_some(),
+        "B should receive keepalive"
+    );
+    assert_eq!(
+        opaque_b.key_confirmed.wait(TIMEOUT),
+        Some(()),
+        "B should confirm key"
+    );
+
+    // -- Send a packet from A with dst matching B's local address --
+    let ip_pkt = make_ipv4_packet(
+        "192.168.1.10".parse().unwrap(),
+        "192.168.2.1".parse().unwrap(),
+        50,
+    );
+    router_a
+        .send(pad(&ip_pkt))
+        .expect("A should route toward B");
+
+    assert!(
+        opaque_a.send.wait(TIMEOUT).is_some(),
+        "A send event should fire"
+    );
+
+    // Read encrypted packet from A, pass to B
+    let mut buf = vec![0u8; 4096];
+    let (len, from) = reader_ab.read(&mut buf).await.unwrap();
+    buf.truncate(len);
+    router_b
+        .recv(from, buf)
+        .expect("B should process data packet");
+
+    // B receives the packet (recv callback fires)
+    assert!(
+        opaque_b.recv.wait(TIMEOUT).is_some(),
+        "B should fire recv callback"
+    );
+
+    // B should deliver to TUN (dst matches local address)
+    let tun_reader_b = &tun_b_readers[0];
+    let mut tun_buf = vec![0u8; 4096];
+    let tun_result = tokio::time::timeout(TIMEOUT, tun_reader_b.read(&mut tun_buf, 0)).await;
+    assert!(
+        tun_result.is_ok(),
+        "B's TUN should receive the packet (local delivery)"
+    );
+    let tun_len = tun_result.unwrap().unwrap();
+    assert!(tun_len > 0, "B's TUN should have data");
+    // Verify it's the right packet
+    assert_eq!(tun_buf[16], 192);
+    assert_eq!(tun_buf[17], 168);
+    assert_eq!(tun_buf[18], 2);
+    assert_eq!(tun_buf[19], 1);
+}
+
+/// Test that when forwarding is DISABLED, packets are always delivered
+/// to TUN regardless of destination address.
+#[tokio::test]
+async fn test_forwarding_disabled_delivers_to_tun() {
+    // -- Key material for link A<->B --
+    let (kp_ab_init, kp_ab_resp) = make_link_keypairs([0x53; 32], [0x52; 32], 0x0001, 0x0002);
+
+    // -- UDP pair A -> B --
+    // writer_a (index 1) goes to router A; readers_a (index 3) is where
+    // the test reads A's outbound (tx_a -> rx_a).
+    let (_, udp_ab_writer, _, udp_ab_readers, _, _) = dummy_udp::create_pair();
+
+    // -- TUN for B (we observe it) --
+    let (_, tun_b_writer, tun_b_readers, _) = dummy_tun::create_pair();
+
+    // A doesn't need TUN observation
+    let (_, tun_a_writer, _, _) = dummy_tun::create_pair();
+
+    // -- Create routers --
+    let router_a = make_test_router(tun_a_writer, udp_ab_writer);
+    let router_b = make_test_router(tun_b_writer, dummy_udp::DummyUdpWriter::new_sink());
+
+    // -- Router A: peer toward B --
+    let opaque_a = Opaque::new();
+    let peer_a_to_b = router_a.new_peer(opaque_a.clone());
+    peer_a_to_b.add_allowed_ip("192.168.2.0".parse().unwrap(), 24);
+    peer_a_to_b.add_allowed_ip("192.168.3.0".parse().unwrap(), 24);
+    peer_a_to_b.set_endpoint(dummy_udp::DummyEndpoint::from_address(
+        "127.0.0.1:1001".parse().unwrap(),
+    ));
+
+    // -- Router B: peer from A --
+    let opaque_b = Opaque::new();
+    let peer_b_from_a = router_b.new_peer(opaque_b.clone());
+    peer_b_from_a.add_allowed_ip("192.168.1.0".parse().unwrap(), 24);
+
+    // B has local_addresses set but forwarding is DISABLED (default)
+    router_b.add_local_address("192.168.2.1".parse().unwrap());
+    // forwarding_enabled is false by default -- do NOT call set_forwarding_enabled
+
+    // -- Install keypairs and exchange keepalive --
+    peer_b_from_a.add_keypair(kp_ab_resp);
+    peer_a_to_b.add_keypair(kp_ab_init);
+
+    assert!(
+        opaque_a.send.wait(TIMEOUT).is_some(),
+        "A should send keepalive"
+    );
+
+    let reader_ab = &udp_ab_readers[0];
+    let mut buf = vec![0u8; 4096];
+    let (len, from) = reader_ab.read(&mut buf).await.unwrap();
+    buf.truncate(len);
+    router_b
+        .recv(from, buf)
+        .expect("B should process keepalive");
+
+    assert!(
+        opaque_b.recv.wait(TIMEOUT).is_some(),
+        "B should receive keepalive"
+    );
+    assert_eq!(
+        opaque_b.key_confirmed.wait(TIMEOUT),
+        Some(()),
+        "B should confirm key"
+    );
+
+    // -- Send a packet from A with dst=192.168.3.1 (NOT B's local address) --
+    // With forwarding disabled, this should still go to TUN.
+    let ip_pkt = make_ipv4_packet(
+        "192.168.1.10".parse().unwrap(),
+        "192.168.3.1".parse().unwrap(),
+        50,
+    );
+    router_a
+        .send(pad(&ip_pkt))
+        .expect("A should route toward B");
+
+    assert!(
+        opaque_a.send.wait(TIMEOUT).is_some(),
+        "A send event should fire"
+    );
+
+    // Read encrypted packet from A, pass to B
+    let mut buf = vec![0u8; 4096];
+    let (len, from) = reader_ab.read(&mut buf).await.unwrap();
+    buf.truncate(len);
+    router_b
+        .recv(from, buf)
+        .expect("B should process data packet");
+
+    // B receives the packet (recv callback fires)
+    assert!(
+        opaque_b.recv.wait(TIMEOUT).is_some(),
+        "B should fire recv callback"
+    );
+
+    // B should deliver to TUN (forwarding disabled, normal behavior)
+    let tun_reader_b = &tun_b_readers[0];
+    let mut tun_buf = vec![0u8; 4096];
+    let tun_result = tokio::time::timeout(TIMEOUT, tun_reader_b.read(&mut tun_buf, 0)).await;
+    assert!(
+        tun_result.is_ok(),
+        "B's TUN should receive the packet (forwarding disabled)"
+    );
+    let tun_len = tun_result.unwrap().unwrap();
+    assert!(tun_len > 0, "B's TUN should have data");
+    // Verify destination IP is 192.168.3.1
+    assert_eq!(tun_buf[16], 192);
+    assert_eq!(tun_buf[17], 168);
+    assert_eq!(tun_buf[18], 3);
+    assert_eq!(tun_buf[19], 1);
+}

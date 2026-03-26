@@ -1,3 +1,5 @@
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
 const VERSION_IP4: u8 = 4;
 const VERSION_IP6: u8 = 6;
 
@@ -21,6 +23,27 @@ pub fn inner_length(packet: &[u8]) -> Option<usize> {
             // Payload length is at bytes [4..6] in big-endian, plus 40-byte header
             let payload_len = u16::from_be_bytes([packet[4], packet[5]]) as usize;
             Some(payload_len + 40)
+        }
+        _ => None,
+    }
+}
+
+/// Extract the destination IP address from an IP packet header.
+/// Returns None for non-IP packets or packets too short to parse.
+#[inline(always)]
+pub fn extract_dest_ip(packet: &[u8]) -> Option<IpAddr> {
+    if packet.is_empty() {
+        return None;
+    }
+    match packet[0] >> 4 {
+        VERSION_IP4 if packet.len() >= 20 => {
+            let ip = Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]);
+            Some(IpAddr::V4(ip))
+        }
+        VERSION_IP6 if packet.len() >= 40 => {
+            let mut octets = [0u8; 16];
+            octets.copy_from_slice(&packet[24..40]);
+            Some(IpAddr::V6(Ipv6Addr::from(octets)))
         }
         _ => None,
     }

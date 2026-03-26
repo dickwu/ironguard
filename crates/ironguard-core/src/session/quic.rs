@@ -316,7 +316,10 @@ pub fn make_client_config_pinned(
 pub fn extract_peer_cert(connection: &quinn::Connection) -> Result<Vec<u8>, SessionError> {
     let peer_certs = connection
         .peer_identity()
-        .and_then(|id| id.downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>().ok())
+        .and_then(|id| {
+            id.downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>()
+                .ok()
+        })
         .ok_or_else(|| {
             SessionError::QuicDatagram("peer did not present a TLS certificate".into())
         })?;
@@ -324,9 +327,7 @@ pub fn extract_peer_cert(connection: &quinn::Connection) -> Result<Vec<u8>, Sess
     peer_certs
         .first()
         .map(|cert| cert.as_ref().to_vec())
-        .ok_or_else(|| {
-            SessionError::QuicDatagram("peer certificate chain is empty".into())
-        })
+        .ok_or_else(|| SessionError::QuicDatagram("peer certificate chain is empty".into()))
 }
 
 // ---------------------------------------------------------------------------

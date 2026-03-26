@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::marker::PhantomData;
+use std::net::IpAddr;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -43,6 +44,11 @@ pub struct DeviceInner<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWri
     #[allow(clippy::type_complexity)]
     pub(super) recv: RwLock<HashMap<u32, Arc<DecryptionState<E, C, T, B>>>>,
     pub(super) table: RoutingTable<Peer<E, C, T, B>>,
+
+    // mesh forwarding
+    pub forwarding_enabled: AtomicBool,
+    pub local_addresses: RwLock<Vec<IpAddr>>,
+    pub forwarding_table: RoutingTable<Peer<E, C, T, B>>,
 
     // work queue
     pub(super) work: ParallelQueue<JobUnion<E, C, T, B>>,
@@ -130,6 +136,9 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> DeviceHand
                 udp_write_tx,
                 recv: RwLock::new(HashMap::new()),
                 table: RoutingTable::new(),
+                forwarding_enabled: AtomicBool::new(false),
+                local_addresses: RwLock::new(Vec::new()),
+                forwarding_table: RoutingTable::new(),
             }),
         };
 
@@ -223,5 +232,31 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> DeviceHand
     /// The actual writer is owned by the UDP write worker task.
     pub fn set_outbound_ready(&self) {
         self.state.outbound_ready.store(true, Ordering::Release);
+    }
+
+    /// Add a local VPN address. Packets destined for a local address are
+    /// delivered to TUN; all others may be forwarded to another peer when
+    /// forwarding is enabled.
+    pub fn add_local_address(&self, addr: IpAddr) {
+        self.state.local_addresses.write().push(addr);
+    }
+
+    /// Enable or disable L3 forwarding through this device. When enabled,
+    /// inbound packets whose destination does not match a local address are
+    /// re-encrypted and sent to the next-hop peer found in the forwarding
+    /// table.
+    pub fn set_forwarding_enabled(&self, enabled: bool) {
+        self.state
+            .forwarding_enabled
+            .store(enabled, Ordering::Release);
+    }
+
+    /// Insert a route into the forwarding table. The forwarding table is
+    /// separate from the main crypto-key routing table and is consulted
+    /// only when forwarding is enabled for transit traffic.
+    pub fn add_forwarding_route(&self, ip: IpAddr, masklen: u32, peer: &PeerHandle<E, C, T, B>) {
+        self.state
+            .forwarding_table
+            .insert(ip, masklen, peer.peer().clone());
     }
 }

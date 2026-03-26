@@ -1,7 +1,7 @@
-use crate::constants::REJECT_AFTER_MESSAGES;
+use crate::constants::{REJECT_AFTER_MESSAGES, SIZE_MESSAGE_PREFIX};
 
 use super::device::DecryptionState;
-use super::ip::inner_length;
+use super::ip::{extract_dest_ip, inner_length};
 use super::messages_v2::{FrameHeader, HEADER_SIZE, TYPE_DATA, TYPE_KEEPALIVE};
 use super::queue::{ParallelJob, Queue, SequentialJob};
 use super::types::Callbacks;
@@ -192,6 +192,32 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> Sequential
         let packet = &msg.1[HEADER_SIZE..];
         if let Some(inner) = inner_length(packet) {
             if inner + SIZE_TAG <= packet.len() {
+                // If forwarding is enabled, check whether the destination
+                // should be forwarded to another peer instead of delivered
+                // locally via TUN.
+                if peer.device.forwarding_enabled.load(Ordering::Relaxed) {
+                    let ip_data = &packet[..inner];
+                    let dest_ip = extract_dest_ip(ip_data);
+                    let is_local =
+                        dest_ip.is_none_or(|ip| peer.device.local_addresses.read().contains(&ip));
+
+                    if !is_local {
+                        // Look up forwarding table for next-hop peer
+                        if let Some(egress_peer) = peer.device.forwarding_table.get_route(ip_data) {
+                            // Build a fresh buffer with SIZE_MESSAGE_PREFIX
+                            // headroom for re-encryption by the egress peer's
+                            // send path.
+                            let mut fwd_buf = vec![0u8; SIZE_MESSAGE_PREFIX + inner];
+                            fwd_buf[SIZE_MESSAGE_PREFIX..].copy_from_slice(&ip_data[..inner]);
+                            egress_peer.send(fwd_buf, false);
+                        }
+                        // Forwarded or no route -- do not write to TUN.
+                        // Trigger callback and return.
+                        C::recv(&peer.opaque, msg.1.len(), true, &job.state.keypair);
+                        return;
+                    }
+                }
+
                 let buf = packet[..inner].to_vec();
                 let _ = peer.device.tun_write_tx.try_send(buf);
             }

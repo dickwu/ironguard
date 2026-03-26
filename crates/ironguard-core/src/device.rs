@@ -430,8 +430,7 @@ mod tests_v2 {
         use crate::types::{CachedAeadKey, Key, KeyPair};
 
         // ── Step 1: Create dummy TUN and UDP pairs ───────────────────────
-        let (a_tun_readers, a_tun_writer, _b_tun_readers, b_tun_writer) =
-            dummy_tun::create_pair();
+        let (a_tun_readers, a_tun_writer, _b_tun_readers, b_tun_writer) = dummy_tun::create_pair();
         let (a_udp_readers, a_udp_writer, _a_owner, b_udp_readers, b_udp_writer, _b_owner) =
             dummy_udp::create_pair();
 

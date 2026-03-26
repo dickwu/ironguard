@@ -130,6 +130,7 @@ mod tests {
                 transport: "udp".to_string(),
                 quic: None,
                 post_quantum: PostQuantumMode::default(),
+                mesh: None,
                 peers: vec![PeerConfig {
                     public_key: peer_pk.to_string(),
                     preshared_key_file: psk_file.map(|s| s.to_string()),
@@ -139,6 +140,8 @@ mod tests {
                     comment: None,
                     pq_public_key: None,
                     quic_port: None,
+                    role: None,
+                    relay_for: Vec::new(),
                 }],
             },
         );
