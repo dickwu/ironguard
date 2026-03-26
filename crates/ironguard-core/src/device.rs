@@ -639,3 +639,177 @@ mod tests {
         wg_b.down();
     }
 }
+
+/// v2-only device tests — no legacy-wireguard feature required.
+/// These tests use direct keypair installation (simulating what QUIC
+/// SessionManager does) instead of Noise handshakes.
+#[cfg(test)]
+mod tests_v2 {
+    use super::*;
+    use crate::constants::SIZE_MESSAGE_PREFIX;
+    use ironguard_platform::dummy::tun as dummy_tun;
+    use ironguard_platform::dummy::tun::DummyTun;
+    use ironguard_platform::dummy::udp as dummy_udp;
+    use ironguard_platform::dummy::udp::DummyUdp;
+    use ironguard_platform::endpoint::Endpoint;
+    use std::time::{Duration, Instant};
+
+    type TestWireGuard = WireGuard<DummyTun, DummyUdp>;
+
+    fn make_ipv4_packet(src: [u8; 4], dst: [u8; 4], body_size: usize) -> Vec<u8> {
+        let total_len = 20 + body_size;
+        let mut pkt = vec![0u8; total_len];
+        pkt[0] = 0x45;
+        pkt[2] = (total_len >> 8) as u8;
+        pkt[3] = total_len as u8;
+        pkt[12..16].copy_from_slice(&src);
+        pkt[16..20].copy_from_slice(&dst);
+        pkt
+    }
+
+    #[test]
+    fn test_v2_device_create_and_add_peer() {
+        let (_, tun_writer, _, _) = dummy_tun::create_pair();
+        let wg: TestWireGuard = WireGuard::new(tun_writer);
+
+        let peer_pk = PublicKey::from_bytes([1u8; 32]);
+        assert!(wg.add_peer(peer_pk.clone()));
+        assert!(wg.get_peer_handle(&peer_pk).is_some());
+    }
+
+    #[test]
+    fn test_v2_device_up_down() {
+        let (_, tun_writer, _, _) = dummy_tun::create_pair();
+        let wg: TestWireGuard = WireGuard::new(tun_writer);
+        wg.up(1500);
+        assert_eq!(wg.mtu.load(Ordering::Relaxed), 1500);
+        wg.down();
+        assert_eq!(wg.mtu.load(Ordering::Relaxed), 0);
+    }
+
+    /// Full v2 tunnel test: two devices exchange data via direct keypair
+    /// installation (simulating QUIC SessionManager). No Noise handshake.
+    ///
+    /// This is the v2 replacement for the legacy test_full_wireguard_tunnel.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_v2_full_tunnel() {
+        use crate::types::{CachedAeadKey, Key, KeyPair};
+
+        // ── Step 1: Create dummy TUN and UDP pairs ───────────────────────
+        let (a_tun_readers, a_tun_writer, _b_tun_readers, b_tun_writer) =
+            dummy_tun::create_pair();
+        let (a_udp_readers, a_udp_writer, _a_owner, b_udp_readers, b_udp_writer, _b_owner) =
+            dummy_udp::create_pair();
+
+        // ── Step 2: Create two WireGuard devices ─────────────────────────
+        let wg_a: TestWireGuard = WireGuard::new(a_tun_writer);
+        let wg_b: TestWireGuard = WireGuard::new(b_tun_writer);
+
+        // ── Step 3: Add peers to each device ─────────────────────────────
+        let pk_a = PublicKey::from_bytes([0xAA; 32]);
+        let pk_b = PublicKey::from_bytes([0xBB; 32]);
+
+        wg_a.add_peer(pk_b.clone());
+        wg_b.add_peer(pk_a.clone());
+
+        let handle_a = wg_a.get_peer_handle(&pk_b).unwrap();
+        let handle_b = wg_b.get_peer_handle(&pk_a).unwrap();
+
+        // ── Step 4: Configure allowed IPs ────────────────────────────────
+        // Device A sends to 10.0.0.2 via peer B.
+        handle_a.add_allowed_ip("10.0.0.2".parse().unwrap(), 32);
+        // Device B sends to 10.0.0.1 via peer A.
+        handle_b.add_allowed_ip("10.0.0.1".parse().unwrap(), 32);
+
+        // ── Step 5: Install v2 keypairs (simulating QUIC session) ────────
+        // Derive symmetric keys like SessionManager would.
+        let send_key_bytes: [u8; 32] = rand::random();
+        let recv_key_bytes: [u8; 32] = rand::random();
+
+        let a_send_id: u32 = 100; // A's packets carry this as receiver_id for B
+        let a_recv_id: u32 = 200; // B's packets carry this as receiver_id for A
+
+        // Device A: send key encrypts, recv key decrypts.
+        let keypair_a = KeyPair {
+            birth: Instant::now(),
+            send: Key {
+                id: a_send_id,
+                key: send_key_bytes,
+                cached_aead: CachedAeadKey::new(&send_key_bytes),
+            },
+            recv: Key {
+                id: a_recv_id,
+                key: recv_key_bytes,
+                cached_aead: CachedAeadKey::new(&recv_key_bytes),
+            },
+            initiator: true,
+        };
+
+        // Device B: swapped — recv key decrypts what A encrypted.
+        let keypair_b = KeyPair {
+            birth: Instant::now(),
+            send: Key {
+                id: a_recv_id,
+                key: recv_key_bytes,
+                cached_aead: CachedAeadKey::new(&recv_key_bytes),
+            },
+            recv: Key {
+                id: a_send_id,
+                key: send_key_bytes,
+                cached_aead: CachedAeadKey::new(&send_key_bytes),
+            },
+            initiator: false,
+        };
+
+        handle_a.add_keypair(keypair_a);
+        handle_b.add_keypair(keypair_b);
+
+        // Set endpoint on A so it knows where to send.
+        handle_a.set_endpoint(dummy_udp::DummyEndpoint::from_address(
+            "127.0.0.1:51820".parse().unwrap(),
+        ));
+
+        // ── Step 6: Bind UDP and TUN workers ─────────────────────────────
+        wg_a.set_writer(a_udp_writer);
+        wg_b.set_writer(b_udp_writer);
+
+        for reader in a_udp_readers {
+            wg_a.add_udp_reader(reader);
+        }
+        for reader in b_udp_readers {
+            wg_b.add_udp_reader(reader);
+        }
+
+        for reader in a_tun_readers {
+            wg_a.add_tun_reader(reader);
+        }
+
+        wg_a.up(1500);
+        wg_b.up(1500);
+
+        // ── Step 7: Send a packet from A to B ────────────────────────────
+        let test_pkt = make_ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], 64);
+        let mut msg = vec![0u8; SIZE_MESSAGE_PREFIX + test_pkt.len()];
+        msg[SIZE_MESSAGE_PREFIX..].copy_from_slice(&test_pkt);
+
+        wg_a.router.send(msg).expect("A->B send should succeed");
+
+        // Give workers time to process.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // ── Step 8: Verify B decrypted and delivered to TUN ──────────────
+        // The packet should have been encrypted by A, sent via dummy UDP,
+        // received by B's udp_worker, decrypted, and sent to B's tun_write_tx.
+        // We verify by checking that B's peer handle received data.
+        let b_stats = handle_b.get_endpoint();
+        // B should have learned A's endpoint from the incoming packet.
+        assert!(
+            b_stats.is_some(),
+            "B should have learned A's endpoint from the decrypted packet"
+        );
+
+        // ── Step 9: Clean shutdown ───────────────────────────────────────
+        wg_a.down();
+        wg_b.down();
+    }
+}
