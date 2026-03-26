@@ -156,8 +156,9 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> Drop
 
         let peer = &self.peer;
 
-        // remove from cryptkey router
+        // remove from cryptkey router and forwarding table
         peer.device.table.remove(peer);
+        peer.device.forwarding_table.remove(peer);
 
         // release ids from the receiver map
         let mut keys = peer.keys.lock();
@@ -329,6 +330,12 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> Peer<E, C,
 }
 
 impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> PeerHandle<E, C, T, B> {
+    /// Return a reference to the inner `Peer` (for use by the device layer
+    /// when populating the forwarding table).
+    pub(super) fn peer(&self) -> &Peer<E, C, T, B> {
+        &self.peer
+    }
+
     /// Set the endpoint of the peer.
     pub fn set_endpoint(&self, endpoint: E) {
         *self.peer.endpoint.lock() = Some(endpoint);

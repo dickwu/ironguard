@@ -52,7 +52,7 @@ jobs:
 
       - name: Build release binaries
         run: |
-          cargo build --release --target ${{ matrix.target }} --features "quic,pq" --bin ironguard
+          cargo build --release --target ${{ matrix.target }} --bin ironguard
           cargo build --release --target ${{ matrix.target }} --bin ironguard-tui
 
       - name: Package binaries

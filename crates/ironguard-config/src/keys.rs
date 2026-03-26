@@ -203,6 +203,7 @@ mod tests {
             transport: "udp".to_string(),
             quic: None,
             post_quantum: Default::default(),
+            mesh: None,
             peers: vec![],
         };
 
@@ -228,6 +229,7 @@ mod tests {
             transport: "udp".to_string(),
             quic: None,
             post_quantum: Default::default(),
+            mesh: None,
             peers: vec![],
         };
 
@@ -251,6 +253,7 @@ mod tests {
             transport: "udp".to_string(),
             quic: None,
             post_quantum: Default::default(),
+            mesh: None,
             peers: vec![],
         };
 
@@ -273,6 +276,8 @@ mod tests {
             comment: None,
             pq_public_key: None,
             quic_port: None,
+            role: None,
+            relay_for: Vec::new(),
         };
 
         let loaded = load_preshared_key(&peer).unwrap();
@@ -290,6 +295,8 @@ mod tests {
             comment: None,
             pq_public_key: None,
             quic_port: None,
+            role: None,
+            relay_for: Vec::new(),
         };
 
         assert_eq!(load_preshared_key(&peer).unwrap(), None);
@@ -314,6 +321,7 @@ mod tests {
             transport: "udp".to_string(),
             quic: None,
             post_quantum: Default::default(),
+            mesh: None,
             peers: vec![],
         };
 

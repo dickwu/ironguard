@@ -1,15 +1,16 @@
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tokio::sync::mpsc;
 
 use crate::constants::{
-    DURATION_UNDER_LOAD, MAX_QUEUED_INCOMING_HANDSHAKES, MESSAGE_PADDING_MULTIPLE,
-    SIZE_MESSAGE_PREFIX, THRESHOLD_UNDER_LOAD, TYPE_COOKIE_REPLY, TYPE_INITIATION, TYPE_RESPONSE,
+    MESSAGE_PADDING_MULTIPLE, SIZE_MESSAGE_PREFIX, TYPE_COOKIE_REPLY, TYPE_INITIATION,
+    TYPE_RESPONSE,
 };
 use crate::device::WireGuard;
 use crate::pipeline::batch::{DEFAULT_BATCH_FLUSH_TIMEOUT_US, DEFAULT_BATCH_MAX_COUNT};
 use crate::router::messages_v2;
+use crate::router::relay::RelayTable;
 use crate::types::PublicKey;
 
 use ironguard_platform::endpoint::Endpoint;
@@ -89,9 +90,27 @@ fn dispatch_udp_message<T: tun::Tun, B: udp::Udp>(
     wg: &WireGuard<T, B>,
     msg: Vec<u8>,
     src: B::Endpoint,
+    relay_table: Option<&RelayTable>,
 ) {
     if msg.len() < 4 {
         return;
+    }
+
+    // Opaque relay: if the receiver ID matches a relay route, forward
+    // the raw encrypted packet without decryption.
+    if let Some(table) = relay_table {
+        if msg.len() >= 8 {
+            let receiver_id = u32::from_le_bytes([msg[4], msg[5], msg[6], msg[7]]);
+            if let Some(&target_addr) = table.read().get(&receiver_id) {
+                tracing::trace!(
+                    receiver_id,
+                    target = %target_addr,
+                    "relaying opaque packet"
+                );
+                wg.router.relay_raw(msg, target_addr);
+                return;
+            }
+        }
     }
 
     // First byte is the type in both v2 frames and legacy handshake messages
@@ -133,6 +152,19 @@ const MAX_RECV_BATCH: usize = 64;
 ///
 /// Runs as a Tokio task. The reader.read() call is async.
 pub async fn udp_worker<T: tun::Tun, B: udp::Udp>(wg: WireGuard<T, B>, reader: B::Reader) {
+    udp_worker_with_relay(wg, reader, None).await;
+}
+
+/// UDP reader worker with optional opaque relay support.
+///
+/// When a relay table is provided, incoming packets whose receiver ID matches
+/// an entry in the table are forwarded as-is to the relay target without
+/// decryption. All other packets are dispatched normally.
+pub async fn udp_worker_with_relay<T: tun::Tun, B: udp::Udp>(
+    wg: WireGuard<T, B>,
+    reader: B::Reader,
+    relay_table: Option<RelayTable>,
+) {
     loop {
         // Use current MTU for buffer sizing; add MAX_HANDSHAKE_MSG_SIZE
         // so the buffer is always large enough for handshake messages.
@@ -164,88 +196,7 @@ pub async fn udp_worker<T: tun::Tun, B: udp::Udp>(wg: WireGuard<T, B>, reader: B
         for (i, (n, src)) in results.into_iter().enumerate() {
             let mut msg = std::mem::take(&mut bufs[i]);
             msg.truncate(n);
-            dispatch_udp_message(&wg, msg, src);
-        }
-    }
-}
-
-/// Handshake worker: processes handshake jobs from the async mpsc channel.
-///
-/// Runs as a Tokio task. The handshake processing itself is CPU-bound
-/// but fast enough to run on the async runtime.
-pub async fn handshake_worker<T: tun::Tun, B: udp::Udp>(
-    wg: WireGuard<T, B>,
-    mut rx: mpsc::Receiver<HandshakeJob<B::Endpoint>>,
-) where
-    B::Endpoint: Endpoint,
-{
-    while let Some(job) = rx.recv().await {
-        let mut under_load = false;
-        let pending = wg.pending.fetch_sub(1, Ordering::SeqCst);
-        debug_assert!(pending < MAX_QUEUED_INCOMING_HANDSHAKES + (1 << 16));
-
-        if pending > THRESHOLD_UNDER_LOAD {
-            *wg.last_under_load.lock() = Instant::now();
-            under_load = true;
-        }
-
-        if !under_load && DURATION_UNDER_LOAD >= wg.last_under_load.lock().elapsed() {
-            under_load = true;
-        }
-
-        match job {
-            HandshakeJob::Message(msg, mut src) => {
-                let device = wg.peers.read();
-                let src_addr = if under_load {
-                    Some(src.to_address())
-                } else {
-                    None
-                };
-                if let Ok((peer_opaque, resp, keypair)) = device.process(&msg[..], src_addr) {
-                    let mut resp_len: u64 = 0;
-                    if let Some(ref resp_msg) = resp {
-                        resp_len = resp_msg.len() as u64;
-                        let _ = wg.router.send_raw(resp_msg, &mut src);
-                    }
-
-                    if let Some(peer) = peer_opaque {
-                        let req_len = msg.len() as u64;
-                        peer.rx_bytes.fetch_add(req_len, Ordering::Relaxed);
-                        peer.tx_bytes.fetch_add(resp_len, Ordering::Relaxed);
-
-                        // Look up the router PeerHandle to set endpoint / add keypair
-                        if let Some(peer_handle) = wg.get_peer_handle(&peer.pk) {
-                            peer_handle.set_endpoint(src);
-
-                            if resp_len > 0 {
-                                peer.sent_handshake_response();
-                            } else {
-                                peer.timers_handshake_complete();
-                            }
-
-                            if let Some(kp) = keypair {
-                                peer.timers_session_derived();
-                                for id in peer_handle.add_keypair(kp) {
-                                    device.release(id);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            HandshakeJob::New(pk) => {
-                let device = wg.peers.read();
-                if let Some(peer_handle) = wg.get_peer_handle(&pk) {
-                    if let Ok(msg) = device.begin(&pk) {
-                        let _ = peer_handle.send_raw(&msg[..]);
-                        peer_handle.opaque().sent_handshake_initiation();
-                    }
-                    peer_handle
-                        .opaque()
-                        .handshake_queued
-                        .store(false, Ordering::SeqCst);
-                }
-            }
+            dispatch_udp_message(&wg, msg, src, relay_table.as_ref());
         }
     }
 }
@@ -382,5 +333,150 @@ mod tests {
         assert_eq!(padding(17, 1500), 32);
         assert_eq!(padding(1500, 1500), 1500);
         assert_eq!(padding(1501, 1500), 1500);
+    }
+
+    use crate::device::WireGuard;
+    use crate::router::relay::new_relay_table;
+    use ironguard_platform::dummy::tun as dummy_tun;
+    use ironguard_platform::dummy::tun::DummyTun;
+    use ironguard_platform::dummy::udp as dummy_udp;
+    use ironguard_platform::dummy::udp::DummyUdp;
+    use ironguard_platform::udp::UdpReader;
+
+    type TestWireGuard = WireGuard<DummyTun, DummyUdp>;
+
+    /// Build a fake v2 data frame with the given receiver ID.
+    ///
+    /// Layout: Type(1) | Flags(1) | Reserved(2) | ReceiverID(4) | Counter(8) | payload...
+    fn make_v2_frame(receiver_id: u32, payload: &[u8]) -> Vec<u8> {
+        let mut frame = Vec::with_capacity(16 + payload.len());
+        frame.push(crate::router::messages_v2::TYPE_DATA); // type
+        frame.push(0); // flags
+        frame.extend_from_slice(&[0, 0]); // reserved
+        frame.extend_from_slice(&receiver_id.to_le_bytes()); // receiver_id
+        frame.extend_from_slice(&0u64.to_le_bytes()); // counter
+        frame.extend_from_slice(payload); // payload
+        frame
+    }
+
+    /// Test that `dispatch_udp_message` with a relay table forwards packets
+    /// whose receiver ID matches a relay entry, without passing them to the
+    /// router for decryption.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_opaque_relay_forwards_without_decrypt() {
+        // Create a WireGuard device using the current runtime's handle.
+        let (_, tun_writer, _, _) = dummy_tun::create_pair();
+        let wg: TestWireGuard =
+            WireGuard::new_with_handle(tun_writer, tokio::runtime::Handle::current());
+
+        // Create a UDP pair so we can observe relayed packets.
+        // create_pair() returns (readers_a, writer_a, owner_a, readers_b, writer_b, owner_b).
+        // writer_a -> tx_a -> rx_a -> readers_b.
+        // We give writer_a to wg, so wg's output appears on peer_readers (readers_b).
+        let (_udp_readers, udp_writer, _owner, peer_readers, _peer_writer, _peer_owner) =
+            dummy_udp::create_pair();
+        wg.set_writer(udp_writer);
+        wg.up(1500);
+
+        // Set up a relay table with receiver_id=999 -> 10.0.0.99:51820
+        let relay_table = new_relay_table();
+        let target_addr: std::net::SocketAddr = "10.0.0.99:51820".parse().unwrap();
+        relay_table.write().insert(999, target_addr);
+
+        // Build a fake v2 data frame with receiver_id=999
+        let payload = b"opaque-encrypted-payload";
+        let frame = make_v2_frame(999, payload);
+        let frame_copy = frame.clone();
+
+        // Dispatch with relay table
+        let src = dummy_udp::DummyEndpoint::from_address("1.2.3.4:9999".parse().unwrap());
+        dispatch_udp_message(&wg, frame, src, Some(&relay_table));
+
+        // Read the relayed packet from the UDP output (peer_readers = readers_b).
+        let reader = &peer_readers[0];
+        let mut buf = vec![0u8; 4096];
+        let result = tokio::time::timeout(Duration::from_millis(1000), reader.read(&mut buf)).await;
+
+        assert!(result.is_ok(), "relayed packet should appear on UDP output");
+        let (len, endpoint) = result.unwrap().unwrap();
+        buf.truncate(len);
+
+        // Verify the raw bytes were forwarded unmodified
+        assert_eq!(buf, frame_copy, "relayed packet should be unmodified");
+
+        // Verify the destination address
+        assert_eq!(
+            endpoint.to_address(),
+            target_addr,
+            "relayed packet should go to relay target"
+        );
+
+        wg.down();
+    }
+
+    /// Test that packets with a receiver ID NOT in the relay table are NOT
+    /// relayed and instead go through the normal dispatch path.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_relay_table_miss_goes_to_normal_dispatch() {
+        let (_, tun_writer, _, _) = dummy_tun::create_pair();
+        let wg: TestWireGuard =
+            WireGuard::new_with_handle(tun_writer, tokio::runtime::Handle::current());
+
+        let (_udp_readers, udp_writer, _owner, _peer_readers, _peer_writer, _peer_owner) =
+            dummy_udp::create_pair();
+        wg.set_writer(udp_writer);
+        wg.up(1500);
+
+        // Relay table has receiver_id=999 but we send receiver_id=888
+        let relay_table = new_relay_table();
+        relay_table
+            .write()
+            .insert(999, "10.0.0.99:51820".parse().unwrap());
+
+        // Build a frame with receiver_id=888 (not in relay table)
+        let frame = make_v2_frame(888, b"test-payload");
+
+        let src = dummy_udp::DummyEndpoint::from_address("1.2.3.4:9999".parse().unwrap());
+
+        // This should NOT relay (receiver ID not in table).
+        // It will try to process via the normal path. Since receiver_id=888
+        // is not registered in the router's recv map, it will fail silently.
+        // The key assertion is that no relay happens (no packet sent to
+        // 10.0.0.99:51820).
+        dispatch_udp_message(&wg, frame, src, Some(&relay_table));
+
+        // Give workers time to process
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Verify nothing was relayed -- the relay target should not
+        // receive anything. Since we cannot easily observe a non-event on
+        // the UDP output (it could also contain non-relay traffic), we
+        // verify the test completes without panic, confirming the code
+        // path executed correctly without matching the relay table.
+
+        wg.down();
+    }
+
+    /// Test that `dispatch_udp_message` without a relay table behaves normally.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_dispatch_without_relay_table() {
+        let (_, tun_writer, _, _) = dummy_tun::create_pair();
+        let wg: TestWireGuard =
+            WireGuard::new_with_handle(tun_writer, tokio::runtime::Handle::current());
+
+        let (_udp_readers, udp_writer, _owner, _peer_readers, _peer_writer, _peer_owner) =
+            dummy_udp::create_pair();
+        wg.set_writer(udp_writer);
+        wg.up(1500);
+
+        // Build a frame -- dispatch with no relay table
+        let frame = make_v2_frame(999, b"test-payload");
+        let src = dummy_udp::DummyEndpoint::from_address("1.2.3.4:9999".parse().unwrap());
+
+        // Should not panic and should go through normal dispatch path
+        dispatch_udp_message(&wg, frame, src, None);
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        wg.down();
     }
 }

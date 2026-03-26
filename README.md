@@ -2,11 +2,11 @@
 
 A modern, cross-platform WireGuard implementation in pure Rust.
 
-IronGuard is a from-scratch WireGuard implementation built on Rust 2024 edition with async Tokio, modern cryptography, and first-class JSON configuration. It features a v2 high-performance pipeline with AES-256-GCM, batch I/O, and buffer pooling, plus optional QUIC transport for restricted networks, automatic NAT traversal, and post-quantum key exchange for future-proof security.
+IronGuard is a from-scratch WireGuard implementation built on Rust 2024 edition with async Tokio, modern cryptography, and first-class JSON configuration. It features a high-performance pipeline with AES-256-GCM, batch I/O, and buffer pooling, QUIC-based session management for key exchange, automatic NAT traversal, and cross-platform support.
 
 ## Features
 
-- **Full WireGuard Protocol** - Noise_IKpsk2 handshake, crypto-key routing, anti-replay (RFC 6479), per-peer timers, MAC1/MAC2 DoS mitigation
+- **Full WireGuard Protocol** - Crypto-key routing, anti-replay (RFC 6479), per-peer timers, QUIC-based session management
 - **v2 High-Performance Pipeline** - AES-256-GCM AEAD (2.5-3.6x faster than ChaCha20-Poly1305 on AES-NI hardware), two-tier buffer pool, batch accumulator with count/size/timeout flush, per-peer reorder buffer, and v2 frame format with 16-byte headers
 - **Async Tokio Architecture** - Non-blocking I/O with work-stealing runtime, batch-aware TUN and UDP workers, Darwin `sendmsg_x`/`recvmsg_x` and Linux `sendmmsg`/`recvmmsg` for syscall amortization
 - **NAT Traversal** (`ironguard-connect`) - STUN-based NAT detection, coordinated UDP hole punching, birthday paradox spray for symmetric NAT, UPnP port mapping, mDNS LAN auto-discovery, and QUIC-based relay fallback
@@ -14,7 +14,6 @@ IronGuard is a from-scratch WireGuard implementation built on Rust 2024 edition 
 - **JSON Configuration** - `wg.json` format with secrets separation, multi-interface, DNS hostname endpoints, inline comments (JSONC)
 - **Standard Config Interop** - Import/export standard WireGuard `.conf` files
 - **QUIC Transport** (feature-gated) - RFC 9298 MASQUE encapsulation via quinn for traversing firewalls that block UDP, with automatic datagram/stream fallback and session management
-- **Post-Quantum Ready** (feature-gated) - Hybrid ML-KEM-768 + X25519 key exchange via the WireGuard PSK slot (FIPS 203)
 - **Zero-Copy Data Path** - In-place transport header construction, `ring` seal_in_place, and pre-allocated buffer pooling for minimal allocation on the hot path
 - **274 Tests** - Unit, integration, protocol-level, and benchmark tests across all modules
 
@@ -24,7 +23,6 @@ IronGuard is a from-scratch WireGuard implementation built on Rust 2024 edition 
 ironguard/
   crates/
     ironguard-core/       # Pure WireGuard protocol — generic over platform traits
-      handshake/          #   Noise_IKpsk2 via snow, MAC/cookie DoS, rate limiter
       router/             #   Crypto-key routing, AES-256-GCM AEAD, KeyWheel, AntiReplay
       pipeline/           #   v2 buffer pool, batch accumulator, reorder buffer, TransportIO
       session/            #   Epoch-based key derivation, rekey/migration state machines
@@ -64,7 +62,7 @@ ironguard/
 curl -fsSL https://raw.githubusercontent.com/dickwu/ironguard/main/scripts/install.sh | sudo bash
 ```
 
-Detects your OS and architecture, downloads the latest release, installs both `ironguard` and `ironguard-tui` to `/usr/local/bin/`. Supports `--version=v0.2.4` and `--dir=/custom/path`.
+Detects your OS and architecture, downloads the latest release, installs both `ironguard` and `ironguard-tui` to `/usr/local/bin/`. Supports `--version=v0.3.0` and `--dir=/custom/path`.
 
 ### Homebrew (macOS)
 
@@ -94,13 +92,13 @@ sudo mv ironguard ironguard-tui /usr/local/bin/
 
 ```bash
 # Build everything (tunnel + TUI manager)
-cargo build --workspace --release --features "quic,pq"
+cargo build --workspace --release
 
 # Install the TUI manager to ~/.cargo/bin/
 cargo install --path crates/ironguard-tui
 
 # Or install just the tunnel
-cargo install --path crates/ironguard-cli --features "quic,pq"
+cargo install --path crates/ironguard-cli
 ```
 
 ### Generate Keys
@@ -114,10 +112,6 @@ ironguard pubkey < private.key > public.key
 
 # Generate a pre-shared key
 ironguard genpsk > preshared.key
-
-# Generate post-quantum keys (requires --features pq)
-ironguard pq-genkey > pq-private.key
-ironguard pq-pubkey < pq-private.key > pq-public.key
 ```
 
 ### Configure
@@ -195,7 +189,6 @@ ironguard export --json wg.json --interface utun9 --output wg0.conf
 | `transport` | string | `"udp"` | Transport mode: `"udp"` or `"quic"` |
 | `quic.port` | u16 | 443 | QUIC listen port (when transport=quic) |
 | `quic.sni` | string | - | TLS SNI for QUIC |
-| `post_quantum` | bool/string | `false` | PQ mode: `false`, `true`, or `"strict"` |
 | `peers` | array | [] | Peer configurations |
 
 ### Peer Fields
@@ -207,24 +200,18 @@ ironguard export --json wg.json --interface utun9 --output wg0.conf
 | `endpoint` | string | Peer endpoint (`host:port`, DNS supported) |
 | `allowed_ips` | string[] | Allowed IP ranges (CIDR) |
 | `persistent_keepalive` | u64 | Keepalive interval in seconds |
-| `pq_public_key` | string | ML-KEM-768 public key (hex, requires `pq` feature) |
 | `_comment` | string | Inline comment (preserved in round-trips) |
 
 ## Cryptography
 
 | Component | Implementation | Notes |
 |-----------|---------------|-------|
-| Noise Handshake | `snow 0.10` (Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s) | Audited library, feature-gated (`legacy-wireguard`) |
-| AEAD (v2) | `ring 0.17` (AES-256-GCM) | Hardware-accelerated AES-NI, 2.5-3.6x faster than ChaCha20-Poly1305 |
-| AEAD (legacy) | `ring 0.17` (ChaCha20-Poly1305) | BoringSSL assembly for legacy WireGuard compat |
+| AEAD | `ring 0.17` (AES-256-GCM) | Hardware-accelerated AES-NI |
 | Key Exchange | `x25519-dalek 2` | Curve25519 DH |
-| Key Derivation (v2) | HKDF-SHA256 | Epoch-based rekeying with directional key labels |
-| Hashing | `blake2s_simd 1` | AVX2 SIMD-accelerated BLAKE2s |
+| Key Derivation | HKDF-SHA256 | Epoch-based rekeying with directional key labels |
+| Session Management | QUIC (`quinn 0.11` + `rustls 0.23`) | TLS 1.3, DataPlaneInit/Ack key exchange |
 | Key Zeroization | `zeroize 1` | Secure memory clearing on drop |
-| Post-Quantum | `ml-kem 0.2` (FIPS 203 ML-KEM-768) | Feature-gated, hybrid with X25519 |
-| QUIC | `quinn 0.11` + `rustls 0.23` | Feature-gated, TLS 1.3, session management |
 | Anti-Replay | Custom RFC 6479 | 2048-bit sliding window bitmap |
-| DoS Mitigation | Custom MAC1/MAC2/cookie | Per-IP rate limiting (20 pkt/s) |
 
 ## QUIC Transport
 
@@ -248,15 +235,6 @@ When `transport: "quic"` is set, IronGuard encapsulates WireGuard packets inside
   }
 }
 ```
-
-## Post-Quantum Cryptography
-
-IronGuard supports hybrid ML-KEM-768 + X25519 key exchange for protection against quantum computers. The ML-KEM shared secret is injected into the WireGuard PSK slot — no protocol changes needed.
-
-Three modes:
-- `"post_quantum": false` - Disabled (standard WireGuard)
-- `"post_quantum": true` - Enabled with graceful downgrade (log warning if peer lacks PQ key)
-- `"post_quantum": "strict"` - Refuse peers without PQ key exchange
 
 ## Quick Start
 
@@ -352,21 +330,12 @@ ironguard/
     ironguard-core/             # Pure WireGuard protocol (generic over platform traits)
       src/
         device.rs               #   WireGuard<T,B> top-level device orchestration
-        workers.rs              #   Async tun/udp/handshake worker loops
+        workers.rs              #   Async tun/udp worker loops
         timers.rs               #   5 per-peer WireGuard deadline timers
         peer.rs                 #   Per-peer state, stats, handshake bookkeeping
-        queue.rs                #   Bounded parallel handshake work queue
+        queue.rs                #   Bounded parallel work queue
         types.rs                #   StaticSecret, PublicKey, KeyPair wrappers
         constants.rs            #   Protocol constants (sizes, timeouts)
-        handshake/
-          device.rs             #     Handshake device (DashMap receiver-ID lookup)
-          noise.rs              #     Noise_IKpsk2 core functions (snow)
-          macs.rs               #     MAC1/MAC2/cookie DoS mitigation
-          ratelimiter.rs        #     Per-IP token bucket (20 pkt/s)
-          messages.rs           #     Handshake message structs
-          peer.rs               #     Per-peer handshake state
-          timestamp.rs          #     TAI64N replay prevention
-          pq.rs                 #     ML-KEM-768 hybrid key exchange (pq feature)
         router/
           device.rs             #     DeviceHandle: treebitmap IPv4+IPv6 LPM tables
           peer.rs               #     KeyWheel (next/current/previous) + AntiReplay
@@ -483,23 +452,19 @@ ironguard/
 # Run all tests
 cargo test --workspace
 
-# Run with all features
-cargo test --workspace --features "quic,pq"
-
 # Clippy
-cargo clippy --workspace --features "quic,pq"
+cargo clippy --workspace -- -D warnings
 
 # Build release
-cargo build --release --features "quic,pq"
+cargo build --workspace --release
 ```
 
 ### Test Coverage
 
-274 tests passing across all crates:
+Tests passing across all crates:
 
 | Module | Tests | Coverage |
 |--------|-------|----------|
-| Handshake (noise, macs, ratelimiter) | 17 | Handshake completion, key symmetry, DoS mitigation, cookie flow |
 | Router (routing, AEAD, replay, v2 frames) | 17 | LPM routing, bidirectional crypto, anti-replay, key rotation, v2 frame encoding |
 | Pipeline (pool, batch, reorder) | 20+ | Buffer pool alloc/free, batch flush thresholds, reorder window, TransportIO |
 | Session (keys, state, QUIC) | 15+ | Key derivation, epoch rekeying, migration state machine, QUIC handshake |
@@ -509,7 +474,6 @@ cargo build --release --features "quic,pq"
 | Platform | 16 | UDP binding, TUN creation, batch I/O, capabilities detection |
 | Connect | 20 | STUN, hole punching, mDNS, relay protocol, connection manager |
 | QUIC | 2 | Loopback datagram + stream fallback |
-| Post-Quantum | 8 | KEM roundtrip, key serialization, handshake integration |
 
 ## License
 

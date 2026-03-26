@@ -11,16 +11,12 @@ members = [
 
 [workspace.package]
 edition = "2024"
-version = "0.2.4"
+version = "0.3.0"
 license = "GPL-3.0-or-later"
 rust-version = "1.85"
 
 [workspace.dependencies]
 ring = "0.17"
-snow = "0.10"
-blake2b_simd = "1"
-blake2s_simd = "1"
-chacha20poly1305 = "0.10"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 zeroize = { version = "1", features = ["derive"] }
 subtle = "2"
@@ -43,7 +39,6 @@ clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 num_cpus = "1"
 hex = "0.4"
-ml-kem = "0.2"
 proptest = "1"
 tun-rs = "2.8"
 bytes = "1"

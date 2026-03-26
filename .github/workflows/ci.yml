@@ -23,17 +23,11 @@ jobs:
       - name: Build
         run: cargo build --workspace
 
-      - name: Build (all features)
-        run: cargo build --workspace --features "quic,pq"
-
       - name: Test
         run: cargo test --workspace
 
-      - name: Test (all features)
-        run: cargo test --workspace --features "quic,pq"
-
       - name: Clippy
-        run: cargo clippy --workspace --features "quic,pq" -- -D warnings
+        run: cargo clippy --workspace -- -D warnings
 
   fmt:
     runs-on: ubuntu-latest

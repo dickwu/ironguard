@@ -17,7 +17,9 @@ use std::time::Instant;
 use parking_lot::Mutex;
 
 use super::keys::{DataPlaneKeys, Role, derive_epoch_keys};
-use super::quic::{QuicSessionConfig, exchange_data_plane_keys, make_test_client_config};
+use super::quic::{
+    QuicSessionConfig, exchange_data_plane_keys, extract_peer_cert, make_client_config_pinned,
+};
 use super::state::{SessionError, SessionState};
 
 // ---------------------------------------------------------------------------
@@ -42,6 +44,10 @@ pub struct PeerSession {
     exporter_secret: [u8; 64],
     /// Our role in the session (client or server).
     role: Role,
+    /// Per-peer rekey/migration state machine (not shared across peers).
+    state: SessionState,
+    /// The peer's TLS certificate (DER), verified during handshake.
+    pub peer_cert_der: Vec<u8>,
 }
 
 // ---------------------------------------------------------------------------
@@ -50,7 +56,6 @@ pub struct PeerSession {
 
 /// The mutable interior of `SessionManager`, protected by a `Mutex`.
 struct ManagerInner {
-    state: SessionState,
     sessions: HashMap<[u8; 32], PeerSession>,
 }
 
@@ -74,7 +79,6 @@ impl SessionManager {
         Self {
             config,
             inner: Mutex::new(ManagerInner {
-                state: SessionState::new(),
                 sessions: HashMap::new(),
             }),
         }
@@ -123,6 +127,9 @@ impl SessionManager {
     /// exchange, and store the resulting `PeerSession`.
     ///
     /// `peer_pk` is the 32-byte public key used to index the session.
+    /// `peer_cert_der` is the expected TLS certificate (DER) of the peer.
+    ///   When provided, the client pins this certificate and rejects any other.
+    ///   When `None`, falls back to insecure mode (tests only).
     /// `data_port` is the UDP port we will use for the raw data plane.
     /// `receiver_id` is our local receiver ID to advertise.
     ///
@@ -131,18 +138,39 @@ impl SessionManager {
         &self,
         peer_pk: [u8; 32],
         peer_addr: SocketAddr,
+        peer_cert_der: Option<&[u8]>,
         data_port: u16,
         receiver_id: u32,
     ) -> Result<SessionResult, SessionError> {
         let bind_addr = self.config.bind_addr;
 
-        // Build a client endpoint bound to the configured address.
         let mut endpoint = quinn::Endpoint::client(bind_addr)
             .map_err(|e| SessionError::QuicDatagram(format!("bind client: {e}")))?;
 
-        endpoint.set_default_client_config(make_test_client_config());
+        // Use production mTLS config when we have peer cert + our own identity.
+        // Falls back to insecure test config when certs are not configured.
+        let client_config = match (
+            peer_cert_der,
+            self.config.our_certs.is_empty(),
+            &self.config.our_key,
+        ) {
+            (Some(peer_cert), false, Some(our_key)) => make_client_config_pinned(
+                peer_cert,
+                self.config.our_certs.clone(),
+                our_key.clone_key(),
+                &self.config.alpn,
+            )?,
+            _ => {
+                tracing::warn!(
+                    "QUIC connect: no peer cert or own identity configured — using insecure test mode"
+                );
+                super::quic::make_test_client_config()
+            }
+        };
 
-        let sni = "ironguard";
+        endpoint.set_default_client_config(client_config);
+
+        let sni = self.config.sni.as_deref().unwrap_or("ironguard");
 
         let connection = tokio::time::timeout(
             std::time::Duration::from_secs(5),
@@ -156,10 +184,19 @@ impl SessionManager {
         })?
         .map_err(|e| SessionError::QuicDatagram(format!("handshake: {e}")))?;
 
+        // Verify the peer's TLS certificate matches what we expected.
+        let actual_peer_cert = extract_peer_cert(&connection).unwrap_or_default();
+        if let Some(expected) = peer_cert_der {
+            if actual_peer_cert != expected {
+                return Err(SessionError::QuicDatagram(
+                    "peer TLS certificate does not match configured cert".into(),
+                ));
+            }
+        }
+
         let (keys, peer_init) =
             exchange_data_plane_keys(&connection, Role::Client, data_port, receiver_id).await?;
 
-        // Extract the TLS exporter secret for future rekeying.
         let mut exporter_secret = [0u8; 64];
         connection
             .export_keying_material(&mut exporter_secret, b"EXPORTER-ironguard-data-plane", &[])
@@ -181,6 +218,8 @@ impl SessionManager {
             established_at: Instant::now(),
             exporter_secret,
             role: Role::Client,
+            state: SessionState::new(),
+            peer_cert_der: actual_peer_cert,
         };
 
         self.inner.lock().sessions.insert(peer_pk, session);
@@ -201,13 +240,23 @@ impl SessionManager {
         &self,
         peer_pk: [u8; 32],
         connection: quinn::Connection,
+        expected_peer_cert: Option<&[u8]>,
         data_port: u16,
         receiver_id: u32,
     ) -> Result<SessionResult, SessionError> {
+        // Extract and verify the client's TLS certificate.
+        let actual_peer_cert = extract_peer_cert(&connection).unwrap_or_default();
+        if let Some(expected) = expected_peer_cert {
+            if actual_peer_cert != expected {
+                return Err(SessionError::QuicDatagram(
+                    "client TLS certificate does not match configured peer cert".into(),
+                ));
+            }
+        }
+
         let (keys, peer_init) =
             exchange_data_plane_keys(&connection, Role::Server, data_port, receiver_id).await?;
 
-        // Extract the TLS exporter secret for future rekeying.
         let mut exporter_secret = [0u8; 64];
         connection
             .export_keying_material(&mut exporter_secret, b"EXPORTER-ironguard-data-plane", &[])
@@ -229,6 +278,8 @@ impl SessionManager {
             established_at: Instant::now(),
             exporter_secret,
             role: Role::Server,
+            state: SessionState::new(),
+            peer_cert_der: actual_peer_cert,
         };
 
         self.inner.lock().sessions.insert(peer_pk, session);
@@ -266,7 +317,11 @@ impl SessionManager {
 
         let init_msg = {
             let mut inner = self.inner.lock();
-            inner.state.initiate_rekey(our_entropy, our_receiver_id)
+            let session = inner
+                .sessions
+                .get_mut(peer_pk)
+                .ok_or(SessionError::InvalidState)?;
+            session.state.initiate_rekey(our_entropy, our_receiver_id)
         };
 
         // Serialize and send the rekey init as a QUIC datagram.
@@ -317,7 +372,11 @@ impl SessionManager {
 
         let (epoch, initiator_entropy, resp_entropy) = {
             let mut inner = self.inner.lock();
-            inner.state.handle_rekey_ack(&ack)?
+            let session = inner
+                .sessions
+                .get_mut(peer_pk)
+                .ok_or(SessionError::InvalidState)?;
+            session.state.handle_rekey_ack(&ack)?
         };
 
         // Derive new data-plane keys for this epoch.
@@ -421,7 +480,7 @@ mod tests {
             let peer_pk = [0xAA; 32];
             let server_mgr = SessionManager::new(QuicSessionConfig::default());
             let session = server_mgr
-                .accept(peer_pk, connection, 51821, 200)
+                .accept(peer_pk, connection, None, 51821, 200)
                 .await
                 .expect("server accept");
 
@@ -443,6 +502,7 @@ mod tests {
             .connect(
                 peer_pk,
                 format!("127.0.0.1:{server_port}").parse().unwrap(),
+                None,
                 51820,
                 100,
             )
@@ -511,7 +571,7 @@ mod tests {
             let peer_pk = [0xAA; 32];
             let server_mgr = SessionManager::new(QuicSessionConfig::default());
             let session = server_mgr
-                .accept(peer_pk, connection, 51821, 200)
+                .accept(peer_pk, connection, None, 51821, 200)
                 .await
                 .expect("server accept");
 
@@ -527,6 +587,7 @@ mod tests {
             .connect(
                 peer_pk,
                 format!("127.0.0.1:{server_port}").parse().unwrap(),
+                None,
                 51820,
                 100,
             )

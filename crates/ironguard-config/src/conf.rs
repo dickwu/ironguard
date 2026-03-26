@@ -211,6 +211,7 @@ fn parse_conf_content(
         transport: "udp".to_string(),
         quic: None,
         post_quantum: PostQuantumMode::default(),
+        mesh: None,
         peers,
     };
 
@@ -347,6 +348,8 @@ impl PeerBuilder {
             comment: None,
             pq_public_key: None,
             quic_port: None,
+            role: None,
+            relay_for: Vec::new(),
         })
     }
 }

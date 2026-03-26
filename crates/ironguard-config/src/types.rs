@@ -30,6 +30,8 @@ pub struct InterfaceConfig {
     pub quic: Option<QuicConfig>,
     #[serde(default)]
     pub post_quantum: PostQuantumMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh: Option<MeshConfig>,
     #[serde(default)]
     pub peers: Vec<PeerConfig>,
 }
@@ -77,6 +79,20 @@ pub enum PostQuantumMode {
     Strict,
 }
 
+/// Mesh overlay configuration for an interface.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct MeshConfig {
+    /// Whether mesh overlay is enabled for this interface.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Whether this node should forward transit traffic between peers.
+    #[serde(default)]
+    pub forward: bool,
+    /// Whether this node acts as a dedicated relay.
+    #[serde(default)]
+    pub relay: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerConfig {
     pub public_key: String,
@@ -98,6 +114,12 @@ pub struct PeerConfig {
     /// Defaults to endpoint port + 1 when not specified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quic_port: Option<u16>,
+    /// Mesh role for this peer (e.g. "relay", "leaf", "hub").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// Public keys of peers that this peer can relay traffic for.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relay_for: Vec<String>,
 }
 
 fn default_transport() -> String {

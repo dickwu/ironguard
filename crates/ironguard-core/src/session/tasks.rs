@@ -121,7 +121,7 @@ pub async fn quic_accept_loop<K: KeyInstaller>(
             let receiver_id: u32 = rand::random();
 
             match session_mgr
-                .accept(peer_pk, connection, data_port, receiver_id)
+                .accept(peer_pk, connection, None, data_port, receiver_id)
                 .await
             {
                 Ok(result) => {
@@ -379,7 +379,7 @@ mod tests {
             let incoming = server_endpoint.accept().await.expect("accept");
             let conn = incoming.await.expect("connection");
             let mgr = SessionManager::new(QuicSessionConfig::default());
-            let _ = mgr.accept([0xAA; 32], conn, 51821, 200).await;
+            let _ = mgr.accept([0xAA; 32], conn, None, 51821, 200).await;
             server_barrier.wait().await;
         });
 
@@ -390,6 +390,7 @@ mod tests {
             .connect(
                 peer_pk,
                 format!("127.0.0.1:{server_port}").parse().unwrap(),
+                None,
                 51820,
                 100,
             )
