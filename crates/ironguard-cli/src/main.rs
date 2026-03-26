@@ -73,6 +73,9 @@ enum Commands {
         /// Run in foreground (don't daemonize)
         #[arg(short, long)]
         foreground: bool,
+        /// Enable mesh overlay forwarding
+        #[arg(long)]
+        mesh: bool,
     },
     /// Stop a WireGuard interface
     Down {
@@ -137,8 +140,9 @@ async fn main() -> Result<()> {
             interface,
             config,
             foreground,
+            mesh,
         } => {
-            cmd_up(&interface, &config, foreground).await?;
+            cmd_up(&interface, &config, foreground, mesh).await?;
         }
         Commands::Down { interface } => {
             cmd_down(&interface)?;
@@ -190,7 +194,7 @@ async fn main() -> Result<()> {
 /// 4. Install the derived keypair into the router.
 /// 5. Bind raw UDP for the data plane and start pipeline workers.
 #[cfg(target_os = "macos")]
-async fn cmd_up(interface: &str, config_path: &str, foreground: bool) -> Result<()> {
+async fn cmd_up(interface: &str, config_path: &str, foreground: bool, mesh_flag: bool) -> Result<()> {
     ensure_root("up")?;
 
     use std::net::SocketAddr;
@@ -371,15 +375,44 @@ async fn cmd_up(interface: &str, config_path: &str, foreground: bool) -> Result<
         wg.add_tun_reader(reader);
     }
 
-    // 9. Bring up
+    // 9. Mesh forwarding setup
+    let mesh_enabled = mesh_flag
+        || iface_cfg
+            .mesh
+            .as_ref()
+            .is_some_and(|m| m.enabled && m.forward);
+
+    if mesh_enabled {
+        // Set local addresses from interface config
+        for addr_str in &iface_cfg.address {
+            if let Ok((ip, _masklen)) = parse_cidr(addr_str) {
+                wg.router.add_local_address(ip);
+            }
+        }
+
+        // Build forwarding table from peer allowed_ips
+        let peer_handles = wg.peer_handles.read();
+        for (_pk_bytes, peer_handle) in peer_handles.iter() {
+            let allowed = peer_handle.list_allowed_ips();
+            for (ip, masklen) in allowed {
+                wg.router.add_forwarding_route(ip, masklen, peer_handle);
+            }
+        }
+
+        // Enable forwarding
+        wg.router.set_forwarding_enabled(true);
+        eprintln!("mesh forwarding enabled");
+    }
+
+    // 10. Bring up
     let mtu = iface_cfg.mtu.unwrap_or(1420) as usize;
     wg.up(mtu);
 
-    // 10. Start timer task
+    // 11. Start timer task
     let stop = Arc::new(AtomicBool::new(false));
     let _timer = wg.start_timer_task(stop.clone());
 
-    // 11. Spawn QUIC accept loop and rekey timer background tasks.
+    // 12. Spawn QUIC accept loop and rekey timer background tasks.
     let shutdown = Arc::new(tokio::sync::Notify::new());
 
     let wg_installer = Arc::new(WgKeyInstaller { wg: wg.clone() });
@@ -416,11 +449,11 @@ async fn cmd_up(interface: &str, config_path: &str, foreground: bool) -> Result<
 
     write_pid_file(interface)?;
     eprintln!(
-        "interface {interface} is up (mtu={mtu}, transport=quic-session, sessions={})",
+        "interface {interface} is up (mtu={mtu}, transport=quic-session, mesh={mesh_enabled}, sessions={})",
         session_mgr.session_count()
     );
 
-    // 12. Wait for Ctrl+C or SIGTERM
+    // 13. Wait for Ctrl+C or SIGTERM
     tokio::signal::ctrl_c().await?;
 
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -435,7 +468,7 @@ async fn cmd_up(interface: &str, config_path: &str, foreground: bool) -> Result<
 
 /// Linux startup path -- uses SessionManager for QUIC-based key exchange.
 #[cfg(target_os = "linux")]
-async fn cmd_up(interface: &str, config_path: &str, foreground: bool) -> Result<()> {
+async fn cmd_up(interface: &str, config_path: &str, foreground: bool, mesh_flag: bool) -> Result<()> {
     ensure_root("up")?;
 
     use std::net::SocketAddr;
@@ -610,15 +643,44 @@ async fn cmd_up(interface: &str, config_path: &str, foreground: bool) -> Result<
         wg.add_tun_reader(reader);
     }
 
-    // 9. Bring up
+    // 9. Mesh forwarding setup
+    let mesh_enabled = mesh_flag
+        || iface_cfg
+            .mesh
+            .as_ref()
+            .is_some_and(|m| m.enabled && m.forward);
+
+    if mesh_enabled {
+        // Set local addresses from interface config
+        for addr_str in &iface_cfg.address {
+            if let Ok((ip, _masklen)) = parse_cidr(addr_str) {
+                wg.router.add_local_address(ip);
+            }
+        }
+
+        // Build forwarding table from peer allowed_ips
+        let peer_handles = wg.peer_handles.read();
+        for (_pk_bytes, peer_handle) in peer_handles.iter() {
+            let allowed = peer_handle.list_allowed_ips();
+            for (ip, masklen) in allowed {
+                wg.router.add_forwarding_route(ip, masklen, peer_handle);
+            }
+        }
+
+        // Enable forwarding
+        wg.router.set_forwarding_enabled(true);
+        eprintln!("mesh forwarding enabled");
+    }
+
+    // 10. Bring up
     let mtu = iface_cfg.mtu.unwrap_or(1420) as usize;
     wg.up(mtu);
 
-    // 10. Start timer task
+    // 11. Start timer task
     let stop = Arc::new(AtomicBool::new(false));
     let _timer = wg.start_timer_task(stop.clone());
 
-    // 11. Spawn QUIC accept loop and rekey timer background tasks.
+    // 12. Spawn QUIC accept loop and rekey timer background tasks.
     let shutdown = Arc::new(tokio::sync::Notify::new());
 
     let wg_installer = Arc::new(WgKeyInstaller { wg: wg.clone() });
@@ -655,11 +717,11 @@ async fn cmd_up(interface: &str, config_path: &str, foreground: bool) -> Result<
 
     write_pid_file(interface)?;
     eprintln!(
-        "interface {interface} is up (mtu={mtu}, transport=quic-session, sessions={})",
+        "interface {interface} is up (mtu={mtu}, transport=quic-session, mesh={mesh_enabled}, sessions={})",
         session_mgr.session_count()
     );
 
-    // 12. Wait for Ctrl+C or SIGTERM
+    // 13. Wait for Ctrl+C or SIGTERM
     tokio::signal::ctrl_c().await?;
 
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -674,7 +736,7 @@ async fn cmd_up(interface: &str, config_path: &str, foreground: bool) -> Result<
 
 /// Fallback for unsupported platforms.
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-async fn cmd_up(_interface: &str, _config_path: &str, _foreground: bool) -> Result<()> {
+async fn cmd_up(_interface: &str, _config_path: &str, _foreground: bool, _mesh_flag: bool) -> Result<()> {
     eprintln!("Platform not yet supported");
     Ok(())
 }

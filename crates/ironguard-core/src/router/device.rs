@@ -166,6 +166,19 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> DeviceHand
         Ok(())
     }
 
+    /// Relay a raw encrypted packet to the given address without decryption.
+    ///
+    /// Used by the opaque relay path: when a packet's receiver ID matches
+    /// an entry in the relay table, the packet is forwarded as-is to the
+    /// target address. No cryptographic processing is performed.
+    pub fn relay_raw(&self, msg: Vec<u8>, target: std::net::SocketAddr) {
+        if *self.state.outbound_enabled.read() && self.state.outbound_ready.load(Ordering::Acquire)
+        {
+            let ep = E::from_address(target);
+            let _ = self.state.udp_write_tx.try_send((msg, ep));
+        }
+    }
+
     /// Brings the router down (prevents outbound transmission).
     pub fn down(&self) {
         *self.state.outbound_enabled.write() = false;
