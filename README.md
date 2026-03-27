@@ -11,7 +11,7 @@ IronGuard is a from-scratch WireGuard implementation built on Rust 2024 edition 
 - **Async Tokio Architecture** - Non-blocking I/O with work-stealing runtime, batch-aware TUN and UDP workers, Darwin `sendmsg_x`/`recvmsg_x` and Linux `sendmmsg`/`recvmmsg` for syscall amortization
 - **NAT Traversal** (`ironguard-connect`) - STUN-based NAT detection, coordinated UDP hole punching, birthday paradox spray for symmetric NAT, UPnP port mapping, mDNS LAN auto-discovery, and QUIC-based relay fallback
 - **Cross-Platform** - macOS (utun) and Linux support with platform-specific optimizations (GSO/GRO on Linux, kernel buffer tuning on macOS)
-- **JSON Configuration** - `wg.json` format with secrets separation, multi-interface, DNS hostname endpoints, inline comments (JSONC)
+- **JSON Configuration** - `wg.json` format with secrets separation, multi-interface, DNS hostname endpoints
 - **Standard Config Interop** - Import/export standard WireGuard `.conf` files
 - **QUIC Transport** (feature-gated) - RFC 9298 MASQUE encapsulation via quinn for traversing firewalls that block UDP, with automatic datagram/stream fallback and session management
 - **Zero-Copy Data Path** - In-place transport header construction, `ring` seal_in_place, and pre-allocated buffer pooling for minimal allocation on the hot path
@@ -118,9 +118,8 @@ ironguard genpsk > preshared.key
 
 Create a `wg.json` configuration file:
 
-```jsonc
+```json
 {
-  // IronGuard configuration
   "$schema": "ironguard/v1",
   "interfaces": {
     "utun9": {
@@ -128,20 +127,24 @@ Create a `wg.json` configuration file:
       "listen_port": 51820,
       "address": ["10.0.0.1/24"],
       "mtu": 1420,
-      "transport": "udp",
+      "quic": {
+        "port": 51821,
+        "sni": "vpn.example.com"
+      },
       "peers": [
         {
           "public_key": "abc123...",
           "endpoint": "vpn.example.com:51820",
           "allowed_ips": ["10.0.0.2/32"],
-          "persistent_keepalive": 25,
-          "_comment": "Peer B"
+          "persistent_keepalive": 25
         }
       ]
     }
   }
 }
 ```
+
+> **Note:** Config must be valid JSON — JSONC comments are not supported.
 
 ### Run
 
@@ -186,8 +189,7 @@ ironguard export --json wg.json --interface utun9 --output wg0.conf
 | `dns` | string[] | [] | DNS servers |
 | `mtu` | u16 | 1420 | Tunnel MTU |
 | `fwmark` | u32 | 0 | Firewall mark |
-| `transport` | string | `"udp"` | Transport mode: `"udp"` or `"quic"` |
-| `quic.port` | u16 | 443 | QUIC listen port (when transport=quic) |
+| `quic.port` | u16 | `listen_port + 1` | QUIC session handshake port |
 | `quic.sni` | string | - | TLS SNI for QUIC |
 | `peers` | array | [] | Peer configurations |
 
@@ -219,16 +221,16 @@ When `transport: "quic"` is set, IronGuard encapsulates WireGuard packets inside
 
 - Prefers QUIC unreliable datagrams (RFC 9221) for minimum overhead
 - Falls back to length-prefixed QUIC streams if datagrams are unavailable
-- Self-signed certificates (WireGuard's Noise handshake provides authentication)
+- Self-signed certificates (default) or mTLS with `gen-quic-cert` for multi-peer servers
 - Automatic reconnection with session resumption
 
-```jsonc
+```json
 {
   "interfaces": {
     "utun9": {
-      "transport": "quic",
+      "listen_port": 51820,
       "quic": {
-        "port": 443,
+        "port": 51821,
         "sni": "cdn.example.com"
       }
     }
