@@ -227,7 +227,7 @@ async fn cmd_up(
     use std::time::Instant;
 
     use ironguard_core::session::manager::SessionManager;
-    use ironguard_core::session::quic::{QuicSessionConfig, make_test_server_config};
+    use ironguard_core::session::quic::{QuicSessionConfig, make_test_server_config, make_test_client_config, make_server_config_mtls, make_client_config_pinned};
     use ironguard_core::session::tasks::{PeerLookup, quic_accept_loop, rekey_timer_task};
     use ironguard_platform::endpoint::Endpoint;
     use ironguard_platform::macos::endpoint::MacosEndpoint;
@@ -284,6 +284,59 @@ async fn cmd_up(
         tracing::info!("assigned {addr_str} to {iface_name}");
     }
 
+    // Collect local interface subnets so we don't override them with tunnel routes.
+    // This prevents the server from routing its own LAN traffic through the tunnel.
+    let local_subnets: Vec<(std::net::IpAddr, u8)> = {
+        let mut subnets = Vec::new();
+        #[cfg(target_os = "macos")]
+        {
+            // Parse ifconfig output for local subnets
+            if let Ok(output) = std::process::Command::new("ifconfig").output() {
+                let text = String::from_utf8_lossy(&output.stdout);
+                let mut current_iface = String::new();
+                for line in text.lines() {
+                    if !line.starts_with('\t') && !line.starts_with(' ') {
+                        current_iface = line.split(':').next().unwrap_or("").to_string();
+                    }
+                    if current_iface == iface_name { continue; }
+                    if let Some(rest) = line.trim().strip_prefix("inet ") {
+                        let parts: Vec<&str> = rest.split_whitespace().collect();
+                        if let (Some(ip_str), Some(mask_str)) = (parts.first(), parts.iter().position(|&p| p == "netmask").and_then(|i| parts.get(i + 1))) {
+                            if let (Ok(ip), Some(mask)) = (ip_str.parse::<std::net::Ipv4Addr>(), u32::from_str_radix(mask_str.trim_start_matches("0x"), 16).ok()) {
+                                let prefix = mask.leading_ones() as u8;
+                                subnets.push((std::net::IpAddr::V4(ip), prefix));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(output) = std::process::Command::new("ip").args(["addr", "show"]).output() {
+                let text = String::from_utf8_lossy(&output.stdout);
+                let mut current_iface = String::new();
+                for line in text.lines() {
+                    let trimmed = line.trim();
+                    if let Some(idx) = trimmed.find(": ") {
+                        if trimmed.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+                            current_iface = trimmed[idx+2..].split_whitespace().next().unwrap_or("").trim_end_matches(':').to_string();
+                        }
+                    }
+                    if current_iface == iface_name { continue; }
+                    if let Some(rest) = trimmed.strip_prefix("inet ") {
+                        if let Some(cidr) = rest.split_whitespace().next() {
+                            if let Ok((ip, prefix)) = parse_cidr_u8(cidr) {
+                                subnets.push((ip, prefix));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        subnets
+    };
+
     // Add routes for each peer's allowed_ips
     for peer_cfg in &iface_cfg.peers {
         for allowed_ip in &peer_cfg.allowed_ips {
@@ -292,6 +345,26 @@ async fn cmd_up(
                 tracing::warn!(
                     "skipping default route {allowed_ip} -- use post_up for catch-all routing"
                 );
+                continue;
+            }
+            // Skip routes that overlap with local interface subnets to avoid
+            // redirecting the server's own LAN traffic through the tunnel.
+            let overlaps_local = local_subnets.iter().any(|(local_ip, local_prefix)| {
+                if *local_prefix <= prefix_len {
+                    // Check if dest falls within the local subnet
+                    match (dest, local_ip) {
+                        (std::net::IpAddr::V4(d), std::net::IpAddr::V4(l)) => {
+                            let mask = if *local_prefix == 0 { 0u32 } else { !0u32 << (32 - *local_prefix) };
+                            (u32::from(d) & mask) == (u32::from(*l) & mask)
+                        }
+                        _ => false,
+                    }
+                } else {
+                    false
+                }
+            });
+            if overlaps_local {
+                tracing::info!("skipping route {allowed_ip} via {iface_name} (overlaps local subnet)");
                 continue;
             }
             net_mgr.add_route(&iface_name, dest, prefix_len)?;
@@ -348,6 +421,17 @@ async fn cmd_up(
         .ok_or_else(|| anyhow!("set quic.port or ensure listen_port < 65535"))?;
 
     let bind_addr: SocketAddr = format!("0.0.0.0:{quic_port}").parse().unwrap();
+    let (mtls_certs, mtls_key) = if let (Some(cert_file), Some(key_file)) =
+        (&quic_cfg.cert_file, &quic_cfg.key_file)
+    {
+        let certs = ironguard_core::session::quic::load_certs_from_pem(cert_file)
+            .map_err(|e| anyhow!("load cert: {e}"))?;
+        let key = ironguard_core::session::quic::load_key_from_pem(key_file)
+            .map_err(|e| anyhow!("load key: {e}"))?;
+        (certs, Some(key))
+    } else {
+        (Vec::new(), None)
+    };
     let session_config = QuicSessionConfig {
         bind_addr,
         alpn: quic_cfg
@@ -359,8 +443,8 @@ async fn cmd_up(
         cert_path: quic_cfg.cert_path.as_ref().map(std::path::PathBuf::from),
         key_path: quic_cfg.key_path.as_ref().map(std::path::PathBuf::from),
         sni: quic_cfg.sni.clone(),
-        our_certs: Vec::new(),
-        our_key: None,
+        our_certs: mtls_certs,
+        our_key: mtls_key,
     };
     let session_mgr = Arc::new(SessionManager::new(session_config));
 
@@ -374,8 +458,7 @@ async fn cmd_up(
         .peers
         .iter()
         .filter_map(|p| {
-            let bytes = hex::decode(&p.public_key).ok()?;
-            <[u8; 32]>::try_from(bytes.as_slice()).ok()
+            ironguard_config::decode_key(&p.public_key).ok()
         })
         .collect();
 
@@ -427,8 +510,18 @@ async fn cmd_up(
             let quic_port = peer_cfg.quic_port.unwrap_or(addr.port() + 1);
             let quic_addr: SocketAddr = (addr.ip(), quic_port).into();
 
+            // Load the first peer cert (server cert) for pinning, if configured.
+            let peer_cert_der = if !quic_cfg.peer_certs.is_empty() {
+                ironguard_core::session::quic::load_certs_from_pem(&quic_cfg.peer_certs[0])
+                    .ok()
+                    .and_then(|certs| certs.into_iter().next())
+                    .map(|c| c.as_ref().to_vec())
+            } else {
+                None
+            };
+
             match session_mgr
-                .connect(pk_bytes, quic_addr, None, data_port, receiver_id)
+                .connect(pk_bytes, quic_addr, peer_cert_der.as_deref(), data_port, receiver_id)
                 .await
             {
                 Ok(session) => {
@@ -531,7 +624,30 @@ async fn cmd_up(
 
     let wg_installer = Arc::new(WgKeyInstaller { wg: wg.clone() });
 
-    let server_config = make_test_server_config();
+    let server_config = if let (Some(cert_file), Some(key_file)) =
+        (&quic_cfg.cert_file, &quic_cfg.key_file)
+    {
+        let our_certs = ironguard_core::session::quic::load_certs_from_pem(cert_file)
+            .map_err(|e| anyhow!("load server cert: {e}"))?;
+        let our_key = ironguard_core::session::quic::load_key_from_pem(key_file)
+            .map_err(|e| anyhow!("load server key: {e}"))?;
+        let mut trusted = Vec::new();
+        for path in &quic_cfg.peer_certs {
+            let certs = ironguard_core::session::quic::load_certs_from_pem(path)
+                .map_err(|e| anyhow!("load peer cert {path}: {e}"))?;
+            trusted.extend(certs);
+        }
+        if trusted.is_empty() {
+            eprintln!("WARN: quic.cert_file set but no peer_certs — using insecure test mode");
+            make_test_server_config()
+        } else {
+            make_server_config_mtls(our_certs, our_key, &trusted, b"ironguard/1")
+                .map_err(|e| anyhow!("mTLS server config: {e}"))?
+        }
+    } else {
+        eprintln!("WARN: no quic.cert_file/key_file — using insecure test mode");
+        make_test_server_config()
+    };
     let quic_endpoint = quinn::Endpoint::server(server_config.clone(), bind_addr)
         .or_else(|_| {
             let fallback: SocketAddr = (bind_addr.ip(), 0u16).into();
@@ -627,7 +743,7 @@ async fn cmd_up(
     use std::time::Instant;
 
     use ironguard_core::session::manager::SessionManager;
-    use ironguard_core::session::quic::{QuicSessionConfig, make_test_server_config};
+    use ironguard_core::session::quic::{QuicSessionConfig, make_test_server_config, make_test_client_config, make_server_config_mtls, make_client_config_pinned};
     use ironguard_core::session::tasks::{PeerLookup, quic_accept_loop, rekey_timer_task};
     use ironguard_platform::endpoint::Endpoint;
     use ironguard_platform::linux::endpoint::LinuxEndpoint;
@@ -684,6 +800,59 @@ async fn cmd_up(
         tracing::info!("assigned {addr_str} to {iface_name}");
     }
 
+    // Collect local interface subnets so we don't override them with tunnel routes.
+    // This prevents the server from routing its own LAN traffic through the tunnel.
+    let local_subnets: Vec<(std::net::IpAddr, u8)> = {
+        let mut subnets = Vec::new();
+        #[cfg(target_os = "macos")]
+        {
+            // Parse ifconfig output for local subnets
+            if let Ok(output) = std::process::Command::new("ifconfig").output() {
+                let text = String::from_utf8_lossy(&output.stdout);
+                let mut current_iface = String::new();
+                for line in text.lines() {
+                    if !line.starts_with('\t') && !line.starts_with(' ') {
+                        current_iface = line.split(':').next().unwrap_or("").to_string();
+                    }
+                    if current_iface == iface_name { continue; }
+                    if let Some(rest) = line.trim().strip_prefix("inet ") {
+                        let parts: Vec<&str> = rest.split_whitespace().collect();
+                        if let (Some(ip_str), Some(mask_str)) = (parts.first(), parts.iter().position(|&p| p == "netmask").and_then(|i| parts.get(i + 1))) {
+                            if let (Ok(ip), Some(mask)) = (ip_str.parse::<std::net::Ipv4Addr>(), u32::from_str_radix(mask_str.trim_start_matches("0x"), 16).ok()) {
+                                let prefix = mask.leading_ones() as u8;
+                                subnets.push((std::net::IpAddr::V4(ip), prefix));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(output) = std::process::Command::new("ip").args(["addr", "show"]).output() {
+                let text = String::from_utf8_lossy(&output.stdout);
+                let mut current_iface = String::new();
+                for line in text.lines() {
+                    let trimmed = line.trim();
+                    if let Some(idx) = trimmed.find(": ") {
+                        if trimmed.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+                            current_iface = trimmed[idx+2..].split_whitespace().next().unwrap_or("").trim_end_matches(':').to_string();
+                        }
+                    }
+                    if current_iface == iface_name { continue; }
+                    if let Some(rest) = trimmed.strip_prefix("inet ") {
+                        if let Some(cidr) = rest.split_whitespace().next() {
+                            if let Ok((ip, prefix)) = parse_cidr_u8(cidr) {
+                                subnets.push((ip, prefix));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        subnets
+    };
+
     // Add routes for each peer's allowed_ips
     for peer_cfg in &iface_cfg.peers {
         for allowed_ip in &peer_cfg.allowed_ips {
@@ -692,6 +861,26 @@ async fn cmd_up(
                 tracing::warn!(
                     "skipping default route {allowed_ip} -- use post_up for catch-all routing"
                 );
+                continue;
+            }
+            // Skip routes that overlap with local interface subnets to avoid
+            // redirecting the server's own LAN traffic through the tunnel.
+            let overlaps_local = local_subnets.iter().any(|(local_ip, local_prefix)| {
+                if *local_prefix <= prefix_len {
+                    // Check if dest falls within the local subnet
+                    match (dest, local_ip) {
+                        (std::net::IpAddr::V4(d), std::net::IpAddr::V4(l)) => {
+                            let mask = if *local_prefix == 0 { 0u32 } else { !0u32 << (32 - *local_prefix) };
+                            (u32::from(d) & mask) == (u32::from(*l) & mask)
+                        }
+                        _ => false,
+                    }
+                } else {
+                    false
+                }
+            });
+            if overlaps_local {
+                tracing::info!("skipping route {allowed_ip} via {iface_name} (overlaps local subnet)");
                 continue;
             }
             net_mgr.add_route(&iface_name, dest, prefix_len)?;
@@ -748,6 +937,17 @@ async fn cmd_up(
         .ok_or_else(|| anyhow!("set quic.port or ensure listen_port < 65535"))?;
 
     let bind_addr: SocketAddr = format!("0.0.0.0:{quic_port}").parse().unwrap();
+    let (mtls_certs, mtls_key) = if let (Some(cert_file), Some(key_file)) =
+        (&quic_cfg.cert_file, &quic_cfg.key_file)
+    {
+        let certs = ironguard_core::session::quic::load_certs_from_pem(cert_file)
+            .map_err(|e| anyhow!("load cert: {e}"))?;
+        let key = ironguard_core::session::quic::load_key_from_pem(key_file)
+            .map_err(|e| anyhow!("load key: {e}"))?;
+        (certs, Some(key))
+    } else {
+        (Vec::new(), None)
+    };
     let session_config = QuicSessionConfig {
         bind_addr,
         alpn: quic_cfg
@@ -759,8 +959,8 @@ async fn cmd_up(
         cert_path: quic_cfg.cert_path.as_ref().map(std::path::PathBuf::from),
         key_path: quic_cfg.key_path.as_ref().map(std::path::PathBuf::from),
         sni: quic_cfg.sni.clone(),
-        our_certs: Vec::new(),
-        our_key: None,
+        our_certs: mtls_certs,
+        our_key: mtls_key,
     };
     let session_mgr = Arc::new(SessionManager::new(session_config));
 
@@ -774,8 +974,7 @@ async fn cmd_up(
         .peers
         .iter()
         .filter_map(|p| {
-            let bytes = hex::decode(&p.public_key).ok()?;
-            <[u8; 32]>::try_from(bytes.as_slice()).ok()
+            ironguard_config::decode_key(&p.public_key).ok()
         })
         .collect();
 
@@ -822,8 +1021,18 @@ async fn cmd_up(
             let quic_port = peer_cfg.quic_port.unwrap_or(addr.port() + 1);
             let quic_addr: SocketAddr = (addr.ip(), quic_port).into();
 
+            // Load the first peer cert (server cert) for pinning, if configured.
+            let peer_cert_der = if !quic_cfg.peer_certs.is_empty() {
+                ironguard_core::session::quic::load_certs_from_pem(&quic_cfg.peer_certs[0])
+                    .ok()
+                    .and_then(|certs| certs.into_iter().next())
+                    .map(|c| c.as_ref().to_vec())
+            } else {
+                None
+            };
+
             match session_mgr
-                .connect(pk_bytes, quic_addr, None, data_port, receiver_id)
+                .connect(pk_bytes, quic_addr, peer_cert_der.as_deref(), data_port, receiver_id)
                 .await
             {
                 Ok(session) => {
@@ -925,7 +1134,30 @@ async fn cmd_up(
 
     let wg_installer = Arc::new(WgKeyInstaller { wg: wg.clone() });
 
-    let server_config = make_test_server_config();
+    let server_config = if let (Some(cert_file), Some(key_file)) =
+        (&quic_cfg.cert_file, &quic_cfg.key_file)
+    {
+        let our_certs = ironguard_core::session::quic::load_certs_from_pem(cert_file)
+            .map_err(|e| anyhow!("load server cert: {e}"))?;
+        let our_key = ironguard_core::session::quic::load_key_from_pem(key_file)
+            .map_err(|e| anyhow!("load server key: {e}"))?;
+        let mut trusted = Vec::new();
+        for path in &quic_cfg.peer_certs {
+            let certs = ironguard_core::session::quic::load_certs_from_pem(path)
+                .map_err(|e| anyhow!("load peer cert {path}: {e}"))?;
+            trusted.extend(certs);
+        }
+        if trusted.is_empty() {
+            eprintln!("WARN: quic.cert_file set but no peer_certs — using insecure test mode");
+            make_test_server_config()
+        } else {
+            make_server_config_mtls(our_certs, our_key, &trusted, b"ironguard/1")
+                .map_err(|e| anyhow!("mTLS server config: {e}"))?
+        }
+    } else {
+        eprintln!("WARN: no quic.cert_file/key_file — using insecure test mode");
+        make_test_server_config()
+    };
     let quic_endpoint = quinn::Endpoint::server(server_config.clone(), bind_addr)
         .or_else(|_| {
             let fallback: SocketAddr = (bind_addr.ip(), 0u16).into();

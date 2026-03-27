@@ -250,23 +250,83 @@ impl rustls::client::danger::ServerCertVerifier for PinnedCertVerifier {
 /// `our_certs` and `our_key` are this node's TLS identity.
 /// `trusted_client_certs` are the DER-encoded certificates of peers allowed
 /// to connect.
+/// Client certificate verifier that accepts only pinned certificates.
+///
+/// Compares each presented client certificate against a set of trusted DER
+/// bytes. Self-signed certificates (used as both CA and end-entity) are
+/// accepted as long as they appear in the pinned set.
+#[derive(Debug)]
+struct PinnedClientCertVerifier {
+    trusted_certs: Vec<Vec<u8>>,
+}
+
+impl rustls::server::danger::ClientCertVerifier for PinnedClientCertVerifier {
+    fn root_hint_subjects(&self) -> &[rustls::DistinguishedName] {
+        &[]
+    }
+
+    fn verify_client_cert(
+        &self,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::server::danger::ClientCertVerified, rustls::Error> {
+        if self.trusted_certs.iter().any(|c| c.as_slice() == end_entity.as_ref()) {
+            Ok(rustls::server::danger::ClientCertVerified::assertion())
+        } else {
+            Err(rustls::Error::General(
+                "client certificate does not match any pinned peer certificate".into(),
+            ))
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
 pub fn make_server_config_mtls(
     our_certs: Vec<rustls::pki_types::CertificateDer<'static>>,
     our_key: rustls::pki_types::PrivateKeyDer<'static>,
     trusted_client_certs: &[rustls::pki_types::CertificateDer<'static>],
     alpn: &[u8],
 ) -> Result<quinn::ServerConfig, SessionError> {
-    // Build a root cert store from the trusted client certificates.
-    let mut root_store = rustls::RootCertStore::empty();
-    for cert in trusted_client_certs {
-        root_store
-            .add(cert.clone())
-            .map_err(|e| SessionError::QuicDatagram(format!("add trusted cert: {e}")))?;
-    }
+    let trusted: Vec<Vec<u8>> = trusted_client_certs
+        .iter()
+        .map(|c| c.as_ref().to_vec())
+        .collect();
 
-    let client_verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(root_store))
-        .build()
-        .map_err(|e| SessionError::QuicDatagram(format!("client verifier: {e}")))?;
+    let client_verifier = Arc::new(PinnedClientCertVerifier { trusted_certs: trusted });
 
     let mut server_tls = rustls::ServerConfig::builder()
         .with_client_cert_verifier(client_verifier)
@@ -398,6 +458,73 @@ pub fn extract_peer_cert(connection: &quinn::Connection) -> Result<Vec<u8>, Sess
         .first()
         .map(|cert| cert.as_ref().to_vec())
         .ok_or_else(|| SessionError::QuicDatagram("peer certificate chain is empty".into()))
+}
+
+// ---------------------------------------------------------------------------
+// PEM file loading helpers
+// ---------------------------------------------------------------------------
+
+/// Load DER-encoded certificates from a PEM file.
+pub fn load_certs_from_pem(
+    path: &str,
+) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, SessionError> {
+    let pem = std::fs::read_to_string(path)
+        .map_err(|e| SessionError::QuicDatagram(format!("read cert {path}: {e}")))?;
+    let mut certs = Vec::new();
+    for block in pem.split("-----END CERTIFICATE-----") {
+        if let Some(start) = block.find("-----BEGIN CERTIFICATE-----") {
+            let b64: String = block[start + 27..]
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect();
+            let der = base64::engine::general_purpose::STANDARD.decode(&b64)
+                .map_err(|e| SessionError::QuicDatagram(format!("decode cert {path}: {e}")))?;
+            certs.push(rustls::pki_types::CertificateDer::from(der));
+        }
+    }
+    if certs.is_empty() {
+        return Err(SessionError::QuicDatagram(format!(
+            "no certificates found in {path}"
+        )));
+    }
+    Ok(certs)
+}
+
+/// Load a private key from a PEM file.
+pub fn load_key_from_pem(
+    path: &str,
+) -> Result<rustls::pki_types::PrivateKeyDer<'static>, SessionError> {
+    let pem = std::fs::read_to_string(path)
+        .map_err(|e| SessionError::QuicDatagram(format!("read key {path}: {e}")))?;
+    // Try PKCS8 first, then EC
+    for (tag, variant) in [
+        ("PRIVATE KEY", "pkcs8"),
+        ("EC PRIVATE KEY", "sec1"),
+    ] {
+        let begin = format!("-----BEGIN {tag}-----");
+        let end = format!("-----END {tag}-----");
+        if let Some(start) = pem.find(&begin) {
+            if let Some(stop) = pem.find(&end) {
+                let b64: String = pem[start + begin.len()..stop]
+                    .chars()
+                    .filter(|c| !c.is_whitespace())
+                    .collect();
+                let der = base64::engine::general_purpose::STANDARD.decode(&b64)
+                    .map_err(|e| SessionError::QuicDatagram(format!("decode key: {e}")))?;
+                return match variant {
+                    "pkcs8" => Ok(rustls::pki_types::PrivateKeyDer::Pkcs8(
+                        rustls::pki_types::PrivatePkcs8KeyDer::from(der),
+                    )),
+                    _ => Ok(rustls::pki_types::PrivateKeyDer::Sec1(
+                        rustls::pki_types::PrivateSec1KeyDer::from(der),
+                    )),
+                };
+            }
+        }
+    }
+    Err(SessionError::QuicDatagram(format!(
+        "no private key found in {path}"
+    )))
 }
 
 // ---------------------------------------------------------------------------
