@@ -261,8 +261,63 @@ async fn cmd_up(
     }
 
     // 3. Create TUN device
+    let iface_name = interface.to_string();
     let (tun_readers, tun_writer, _tun_status) =
         MacosTun::create(interface).map_err(|e| anyhow!("failed to create TUN device: {e}"))?;
+
+    // 3a. Create platform-specific network manager
+    use ironguard_platform::net_manager::NetworkManager;
+    let net_mgr = ironguard_platform::macos::net_manager::MacosNetManager::new();
+
+    // Crash recovery: clean stale state from previous run
+    for addr_str in &iface_cfg.address {
+        if let Ok((ip, prefix_len)) = parse_cidr_u8(addr_str) {
+            let _ = net_mgr.remove_address(&iface_name, ip, prefix_len);
+        }
+    }
+    let _ = net_mgr.remove_masquerade(&iface_name);
+
+    // Assign addresses to TUN interface
+    for addr_str in &iface_cfg.address {
+        let (ip, prefix_len) = parse_cidr_u8(addr_str)?;
+        net_mgr.add_address(&iface_name, ip, prefix_len)?;
+        tracing::info!("assigned {addr_str} to {iface_name}");
+    }
+
+    // Add routes for each peer's allowed_ips
+    for peer_cfg in &iface_cfg.peers {
+        for allowed_ip in &peer_cfg.allowed_ips {
+            let (dest, prefix_len) = parse_cidr_u8(allowed_ip)?;
+            if prefix_len == 0 {
+                tracing::warn!(
+                    "skipping default route {allowed_ip} -- use post_up for catch-all routing"
+                );
+                continue;
+            }
+            net_mgr.add_route(&iface_name, dest, prefix_len)?;
+            tracing::info!("route {allowed_ip} via {iface_name}");
+        }
+    }
+
+    // Enable masquerade if configured
+    if !iface_cfg.masquerade.is_disabled() {
+        if let Some(tun_subnet) = iface_cfg.address.first() {
+            match &iface_cfg.masquerade {
+                ironguard_config::Masquerade::All => {
+                    net_mgr.add_masquerade(&iface_name, tun_subnet, &[])?;
+                }
+                ironguard_config::Masquerade::Interfaces(ifaces) => {
+                    net_mgr.add_masquerade(&iface_name, tun_subnet, ifaces)?;
+                }
+                ironguard_config::Masquerade::Disabled => {}
+            }
+        }
+    }
+
+    // Run PostUp hooks
+    for cmd in &iface_cfg.post_up {
+        net_mgr.run_hook(cmd, &iface_name)?;
+    }
 
     // 4. Create WireGuard device (raw UDP data plane)
     type Wg = ironguard_core::device::WireGuard<MacosTun, MacosUdp>;
@@ -272,13 +327,27 @@ async fn cmd_up(
     );
 
     // 5. Build SessionManager from QUIC config
+    if let Some(transport) = &iface_cfg.transport {
+        if transport == "udp" {
+            return Err(anyhow!(
+                "UDP transport is not supported. IronGuard uses QUIC-based \
+                 session management. Remove the transport field from your config."
+            ));
+        }
+        tracing::warn!("transport field is deprecated and ignored -- QUIC is always used");
+    }
+
     let quic_cfg = iface_cfg
         .quic
         .as_ref()
-        .ok_or_else(|| anyhow!("up requires a [quic] config section"))?;
+        .ok_or_else(|| anyhow!("missing [quic] config section -- required for IronGuard"))?;
 
-    let bind_addr: SocketAddr =
-        format!("0.0.0.0:{}", quic_cfg.port.unwrap_or(0)).parse().unwrap();
+    let quic_port = quic_cfg
+        .port
+        .or_else(|| iface_cfg.listen_port.filter(|&p| p < 65535).map(|p| p + 1))
+        .ok_or_else(|| anyhow!("set quic.port or ensure listen_port < 65535"))?;
+
+    let bind_addr: SocketAddr = format!("0.0.0.0:{quic_port}").parse().unwrap();
     let session_config = QuicSessionConfig {
         bind_addr,
         alpn: quic_cfg
@@ -300,6 +369,16 @@ async fn cmd_up(
     // Build a peer lookup table for the accept loop.
     let known_peers = Arc::new(PeerLookup::new());
 
+    // Build known_peer_pks set for mTLS identity verification.
+    let known_peer_pks: std::collections::HashSet<[u8; 32]> = iface_cfg
+        .peers
+        .iter()
+        .filter_map(|p| {
+            let bytes = hex::decode(&p.public_key).ok()?;
+            <[u8; 32]>::try_from(bytes.as_slice()).ok()
+        })
+        .collect();
+
     // 6. For each peer: connect via QUIC, get keys, add peer to device
     for (i, peer_cfg) in iface_cfg.peers.iter().enumerate() {
         let pk_bytes = ironguard_config::decode_key(&peer_cfg.public_key)
@@ -317,6 +396,16 @@ async fn cmd_up(
         for allowed_ip_str in &peer_cfg.allowed_ips {
             let (ip, masklen) = parse_cidr(allowed_ip_str)?;
             handle.add_allowed_ip(ip, masklen);
+        }
+
+        // Wire ACL into peer configuration.
+        if let Some(acl) = &peer_cfg.acl {
+            let acl_table = ironguard_core::router::RoutingTable::new();
+            for cidr in &acl.allow_destinations {
+                let (ip, prefix_len) = parse_cidr(cidr)?;
+                acl_table.insert(ip, prefix_len, ());
+            }
+            handle.set_acl_destinations(Some(acl_table));
         }
 
         // Set persistent keepalive.
@@ -460,7 +549,7 @@ async fn cmd_up(
         session_mgr.clone(),
         wg_installer.clone(),
         known_peers,
-        std::collections::HashSet::new(),
+        known_peer_pks,
         actual_port,
         stop.clone(),
         shutdown.clone(),
@@ -474,19 +563,49 @@ async fn cmd_up(
     ));
 
     write_pid_file(interface)?;
+    let cleanup_iface = iface_name.clone();
+    let cleanup_cfg = iface_cfg.clone();
     eprintln!(
         "interface {interface} is up (mtu={mtu}, transport=quic-session, mesh={mesh_enabled}, sessions={})",
         session_mgr.session_count()
     );
 
     // 13. Wait for Ctrl+C or SIGTERM
-    tokio::signal::ctrl_c().await?;
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {},
+        _ = async {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigterm = signal(SignalKind::terminate()).unwrap();
+            sigterm.recv().await;
+        } => {},
+    }
 
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     shutdown.notify_waiters();
 
+    // PostDown hooks
+    for cmd in &cleanup_cfg.post_down {
+        let _ = net_mgr.run_hook(cmd, &cleanup_iface);
+    }
+    // Remove masquerade
+    let _ = net_mgr.remove_masquerade(&cleanup_iface);
+    // Remove routes
+    for peer_cfg in &cleanup_cfg.peers {
+        for allowed_ip in &peer_cfg.allowed_ips {
+            if let Ok((dest, prefix_len)) = parse_cidr_u8(allowed_ip) {
+                let _ = net_mgr.remove_route(&cleanup_iface, dest, prefix_len);
+            }
+        }
+    }
+    // Remove addresses
+    for addr_str in &cleanup_cfg.address {
+        if let Ok((ip, prefix_len)) = parse_cidr_u8(addr_str) {
+            let _ = net_mgr.remove_address(&cleanup_iface, ip, prefix_len);
+        }
+    }
+
     wg.down();
-    remove_pid_file(interface);
+    remove_pid_file(&cleanup_iface);
     eprintln!("interface {interface} is down");
 
     Ok(())
@@ -542,8 +661,63 @@ async fn cmd_up(
     }
 
     // 3. Create TUN device
+    let iface_name = interface.to_string();
     let (tun_readers, tun_writer, _tun_status) =
         LinuxTun::create(interface).map_err(|e| anyhow!("failed to create TUN device: {e}"))?;
+
+    // 3a. Create platform-specific network manager
+    use ironguard_platform::net_manager::NetworkManager;
+    let net_mgr = ironguard_platform::linux::net_manager::LinuxNetManager::new();
+
+    // Crash recovery: clean stale state from previous run
+    for addr_str in &iface_cfg.address {
+        if let Ok((ip, prefix_len)) = parse_cidr_u8(addr_str) {
+            let _ = net_mgr.remove_address(&iface_name, ip, prefix_len);
+        }
+    }
+    let _ = net_mgr.remove_masquerade(&iface_name);
+
+    // Assign addresses to TUN interface
+    for addr_str in &iface_cfg.address {
+        let (ip, prefix_len) = parse_cidr_u8(addr_str)?;
+        net_mgr.add_address(&iface_name, ip, prefix_len)?;
+        tracing::info!("assigned {addr_str} to {iface_name}");
+    }
+
+    // Add routes for each peer's allowed_ips
+    for peer_cfg in &iface_cfg.peers {
+        for allowed_ip in &peer_cfg.allowed_ips {
+            let (dest, prefix_len) = parse_cidr_u8(allowed_ip)?;
+            if prefix_len == 0 {
+                tracing::warn!(
+                    "skipping default route {allowed_ip} -- use post_up for catch-all routing"
+                );
+                continue;
+            }
+            net_mgr.add_route(&iface_name, dest, prefix_len)?;
+            tracing::info!("route {allowed_ip} via {iface_name}");
+        }
+    }
+
+    // Enable masquerade if configured
+    if !iface_cfg.masquerade.is_disabled() {
+        if let Some(tun_subnet) = iface_cfg.address.first() {
+            match &iface_cfg.masquerade {
+                ironguard_config::Masquerade::All => {
+                    net_mgr.add_masquerade(&iface_name, tun_subnet, &[])?;
+                }
+                ironguard_config::Masquerade::Interfaces(ifaces) => {
+                    net_mgr.add_masquerade(&iface_name, tun_subnet, ifaces)?;
+                }
+                ironguard_config::Masquerade::Disabled => {}
+            }
+        }
+    }
+
+    // Run PostUp hooks
+    for cmd in &iface_cfg.post_up {
+        net_mgr.run_hook(cmd, &iface_name)?;
+    }
 
     // 4. Create WireGuard device (raw UDP data plane)
     type Wg = ironguard_core::device::WireGuard<LinuxTun, LinuxUdp>;
@@ -553,13 +727,27 @@ async fn cmd_up(
     );
 
     // 5. Build SessionManager from QUIC config
+    if let Some(transport) = &iface_cfg.transport {
+        if transport == "udp" {
+            return Err(anyhow!(
+                "UDP transport is not supported. IronGuard uses QUIC-based \
+                 session management. Remove the transport field from your config."
+            ));
+        }
+        tracing::warn!("transport field is deprecated and ignored -- QUIC is always used");
+    }
+
     let quic_cfg = iface_cfg
         .quic
         .as_ref()
-        .ok_or_else(|| anyhow!("up requires a [quic] config section"))?;
+        .ok_or_else(|| anyhow!("missing [quic] config section -- required for IronGuard"))?;
 
-    let bind_addr: SocketAddr =
-        format!("0.0.0.0:{}", quic_cfg.port.unwrap_or(0)).parse().unwrap();
+    let quic_port = quic_cfg
+        .port
+        .or_else(|| iface_cfg.listen_port.filter(|&p| p < 65535).map(|p| p + 1))
+        .ok_or_else(|| anyhow!("set quic.port or ensure listen_port < 65535"))?;
+
+    let bind_addr: SocketAddr = format!("0.0.0.0:{quic_port}").parse().unwrap();
     let session_config = QuicSessionConfig {
         bind_addr,
         alpn: quic_cfg
@@ -581,6 +769,16 @@ async fn cmd_up(
     // Build a peer lookup table for the accept loop.
     let known_peers = Arc::new(PeerLookup::new());
 
+    // Build known_peer_pks set for mTLS identity verification.
+    let known_peer_pks: std::collections::HashSet<[u8; 32]> = iface_cfg
+        .peers
+        .iter()
+        .filter_map(|p| {
+            let bytes = hex::decode(&p.public_key).ok()?;
+            <[u8; 32]>::try_from(bytes.as_slice()).ok()
+        })
+        .collect();
+
     // 6. For each peer: connect via QUIC, get keys, add peer to device
     for (i, peer_cfg) in iface_cfg.peers.iter().enumerate() {
         let pk_bytes = ironguard_config::decode_key(&peer_cfg.public_key)
@@ -596,6 +794,16 @@ async fn cmd_up(
         for allowed_ip_str in &peer_cfg.allowed_ips {
             let (ip, masklen) = parse_cidr(allowed_ip_str)?;
             handle.add_allowed_ip(ip, masklen);
+        }
+
+        // Wire ACL into peer configuration.
+        if let Some(acl) = &peer_cfg.acl {
+            let acl_table = ironguard_core::router::RoutingTable::new();
+            for cidr in &acl.allow_destinations {
+                let (ip, prefix_len) = parse_cidr(cidr)?;
+                acl_table.insert(ip, prefix_len, ());
+            }
+            handle.set_acl_destinations(Some(acl_table));
         }
 
         if let Some(ka) = peer_cfg.persistent_keepalive {
@@ -735,7 +943,7 @@ async fn cmd_up(
         session_mgr.clone(),
         wg_installer.clone(),
         known_peers,
-        std::collections::HashSet::new(),
+        known_peer_pks,
         actual_port,
         stop.clone(),
         shutdown.clone(),
@@ -749,19 +957,49 @@ async fn cmd_up(
     ));
 
     write_pid_file(interface)?;
+    let cleanup_iface = iface_name.clone();
+    let cleanup_cfg = iface_cfg.clone();
     eprintln!(
         "interface {interface} is up (mtu={mtu}, transport=quic-session, mesh={mesh_enabled}, sessions={})",
         session_mgr.session_count()
     );
 
     // 13. Wait for Ctrl+C or SIGTERM
-    tokio::signal::ctrl_c().await?;
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {},
+        _ = async {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigterm = signal(SignalKind::terminate()).unwrap();
+            sigterm.recv().await;
+        } => {},
+    }
 
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     shutdown.notify_waiters();
 
+    // PostDown hooks
+    for cmd in &cleanup_cfg.post_down {
+        let _ = net_mgr.run_hook(cmd, &cleanup_iface);
+    }
+    // Remove masquerade
+    let _ = net_mgr.remove_masquerade(&cleanup_iface);
+    // Remove routes
+    for peer_cfg in &cleanup_cfg.peers {
+        for allowed_ip in &peer_cfg.allowed_ips {
+            if let Ok((dest, prefix_len)) = parse_cidr_u8(allowed_ip) {
+                let _ = net_mgr.remove_route(&cleanup_iface, dest, prefix_len);
+            }
+        }
+    }
+    // Remove addresses
+    for addr_str in &cleanup_cfg.address {
+        if let Ok((ip, prefix_len)) = parse_cidr_u8(addr_str) {
+            let _ = net_mgr.remove_address(&cleanup_iface, ip, prefix_len);
+        }
+    }
+
     wg.down();
-    remove_pid_file(interface);
+    remove_pid_file(&cleanup_iface);
     eprintln!("interface {interface} is down");
 
     Ok(())
@@ -847,6 +1085,15 @@ fn parse_cidr(cidr: &str) -> Result<(std::net::IpAddr, u32)> {
         .map_err(|e| anyhow!("invalid mask length in CIDR {cidr}: {e}"))?;
 
     Ok((ip, masklen))
+}
+
+/// Parse CIDR with `u8` prefix length (for NetworkManager API).
+fn parse_cidr_u8(cidr: &str) -> Result<(std::net::IpAddr, u8)> {
+    let (ip, masklen) = parse_cidr(cidr)?;
+    let prefix: u8 = masklen
+        .try_into()
+        .map_err(|_| anyhow!("prefix length {masklen} out of u8 range in {cidr}"))?;
+    Ok((ip, prefix))
 }
 
 fn cmd_status(interface: Option<&str>, config_path: Option<&str>) -> Result<()> {
