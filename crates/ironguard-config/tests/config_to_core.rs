@@ -6,7 +6,9 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 
-use ironguard_config::types::{Config, InterfaceConfig, Masquerade, PeerConfig, PostQuantumMode};
+use ironguard_config::types::{
+    Config, InterfaceConfig, Masquerade, PeerConfig, PostQuantumMode, QuicConfig,
+};
 use ironguard_config::{load_preshared_key, load_private_key, validate};
 use ironguard_core::PublicKey;
 use ironguard_platform::dummy::tun as dummy_tun;
@@ -54,8 +56,19 @@ fn test_config_to_device_setup() {
             dns: vec![],
             mtu: Some(1420),
             fwmark: None,
-            transport: Some("udp".to_string()),
-            quic: None,
+            transport: None,
+            quic: Some(QuicConfig {
+                port: None,
+                sni: None,
+                alpn: None,
+                cert_path: None,
+                key_path: None,
+                mode: Default::default(),
+                datagram_only: false,
+                cert_file: None,
+                key_file: None,
+                peer_certs: Vec::new(),
+            }),
             post_quantum: PostQuantumMode::default(),
             mesh: None,
             peers: vec![
