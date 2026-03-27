@@ -10,6 +10,7 @@ rust-version.workspace = true
 quic = ["dep:quinn", "dep:rustls", "dep:rcgen", "dep:bytes"]
 
 [dependencies]
+anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 parking_lot = { workspace = true }
