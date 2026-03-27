@@ -51,15 +51,18 @@ pub trait KeyInstaller: Send + Sync + 'static {
 ///
 /// `known_peers` is consulted to map inbound connections to peer public keys.
 /// Connections from unknown peers are dropped.
+#[allow(clippy::too_many_arguments)]
 pub async fn quic_accept_loop<K: KeyInstaller>(
     endpoint: quinn::Endpoint,
     session_mgr: Arc<SessionManager>,
     key_installer: Arc<K>,
     known_peers: Arc<PeerLookup>,
+    known_peer_pks: std::collections::HashSet<[u8; 32]>,
     data_port: u16,
     stop: Arc<AtomicBool>,
     shutdown: Arc<Notify>,
 ) {
+    let known_peer_pks = Arc::new(known_peer_pks);
     tracing::info!("QUIC accept loop started");
 
     loop {
@@ -87,6 +90,7 @@ pub async fn quic_accept_loop<K: KeyInstaller>(
         let session_mgr = session_mgr.clone();
         let key_installer = key_installer.clone();
         let known_peers = known_peers.clone();
+        let known_peer_pks = known_peer_pks.clone();
         let stop = stop.clone();
 
         // Handle each connection in a separate task so the accept loop
@@ -106,16 +110,20 @@ pub async fn quic_accept_loop<K: KeyInstaller>(
 
             let remote_addr = connection.remote_address();
 
-            // Look up which peer this connection belongs to.
-            let peer_pk = match known_peers.lookup_by_addr(&remote_addr) {
-                Some(pk) => pk,
-                None => {
-                    tracing::warn!(
-                        remote = %remote_addr,
-                        "QUIC accept: unknown peer address, dropping connection"
-                    );
-                    return;
-                }
+            // Identify the peer: prefer mTLS certificate identity, fall back
+            // to address-based lookup.
+            let peer_pk = match crate::session::quic::extract_peer_identity(&connection) {
+                Some(pk) if known_peer_pks.contains(&pk) => pk,
+                _ => match known_peers.lookup_by_addr(&remote_addr) {
+                    Some(pk) => pk,
+                    None => {
+                        tracing::warn!(
+                            remote = %remote_addr,
+                            "QUIC accept: unknown peer, dropping connection"
+                        );
+                        return;
+                    }
+                },
             };
 
             let receiver_id: u32 = rand::random();
@@ -440,6 +448,7 @@ mod tests {
             session_mgr,
             installer.clone(),
             known_peers,
+            std::collections::HashSet::new(),
             51820,
             stop,
             shutdown_clone,
@@ -521,6 +530,7 @@ mod tests {
             session_mgr,
             installer.clone(),
             known_peers,
+            std::collections::HashSet::new(),
             51820,
             stop,
             shutdown_clone,
