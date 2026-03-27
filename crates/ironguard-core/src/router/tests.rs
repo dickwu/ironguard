@@ -1134,3 +1134,24 @@ async fn test_forwarding_disabled_delivers_to_tun() {
     assert_eq!(tun_buf[18], 3);
     assert_eq!(tun_buf[19], 1);
 }
+
+#[test]
+fn acl_routing_table_as_filter() {
+    use std::net::{IpAddr, Ipv4Addr};
+    use super::route::RoutingTable;
+
+    let acl: RoutingTable<()> = RoutingTable::new();
+    acl.insert(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0)), 24, ());
+
+    // Build a minimal IPv4 packet with dst 10.0.0.5 -- should match
+    let mut allowed = vec![0u8; 20];
+    allowed[0] = 0x45; // IPv4
+    allowed[16..20].copy_from_slice(&[10, 0, 0, 5]); // dst IP
+    assert!(acl.get_route(&allowed).is_some());
+
+    // Build a packet with dst 192.168.1.1 -- should NOT match
+    let mut blocked = vec![0u8; 20];
+    blocked[0] = 0x45;
+    blocked[16..20].copy_from_slice(&[192, 168, 1, 1]);
+    assert!(acl.get_route(&blocked).is_none());
+}

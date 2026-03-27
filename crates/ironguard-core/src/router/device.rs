@@ -209,6 +209,13 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> DeviceHand
             .get_route(packet)
             .ok_or(RouterError::NoCryptoKeyRoute)?;
 
+        // Per-peer ACL: if set, only allow packets to permitted destinations.
+        if let Some(ref acl) = *peer.acl_destinations.read() {
+            if acl.get_route(packet).is_none() {
+                return Err(RouterError::NoCryptoKeyRoute);
+            }
+        }
+
         // schedule for encryption and transmission to peer
         peer.send(msg, true);
         Ok(())
