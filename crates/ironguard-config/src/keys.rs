@@ -200,11 +200,14 @@ mod tests {
             dns: vec![],
             mtu: None,
             fwmark: None,
-            transport: "udp".to_string(),
+            transport: Some("udp".to_string()),
             quic: None,
             post_quantum: Default::default(),
             mesh: None,
             peers: vec![],
+            masquerade: Default::default(),
+            post_up: Vec::new(),
+            post_down: Vec::new(),
         };
 
         let loaded = load_private_key(&config).unwrap();
@@ -226,11 +229,14 @@ mod tests {
             dns: vec![],
             mtu: None,
             fwmark: None,
-            transport: "udp".to_string(),
+            transport: Some("udp".to_string()),
             quic: None,
             post_quantum: Default::default(),
             mesh: None,
             peers: vec![],
+            masquerade: Default::default(),
+            post_up: Vec::new(),
+            post_down: Vec::new(),
         };
 
         let loaded = load_private_key(&config).unwrap();
@@ -250,11 +256,14 @@ mod tests {
             dns: vec![],
             mtu: None,
             fwmark: None,
-            transport: "udp".to_string(),
+            transport: Some("udp".to_string()),
             quic: None,
             post_quantum: Default::default(),
             mesh: None,
             peers: vec![],
+            masquerade: Default::default(),
+            post_up: Vec::new(),
+            post_down: Vec::new(),
         };
 
         assert!(load_private_key(&config).is_err());
@@ -278,6 +287,7 @@ mod tests {
             quic_port: None,
             role: None,
             relay_for: Vec::new(),
+            acl: None,
         };
 
         let loaded = load_preshared_key(&peer).unwrap();
@@ -297,6 +307,7 @@ mod tests {
             quic_port: None,
             role: None,
             relay_for: Vec::new(),
+            acl: None,
         };
 
         assert_eq!(load_preshared_key(&peer).unwrap(), None);
@@ -318,11 +329,14 @@ mod tests {
             dns: vec![],
             mtu: None,
             fwmark: None,
-            transport: "udp".to_string(),
+            transport: Some("udp".to_string()),
             quic: None,
             post_quantum: Default::default(),
             mesh: None,
             peers: vec![],
+            masquerade: Default::default(),
+            post_up: Vec::new(),
+            post_down: Vec::new(),
         };
 
         let loaded = load_private_key(&config).unwrap();

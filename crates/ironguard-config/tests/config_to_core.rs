@@ -54,7 +54,7 @@ fn test_config_to_device_setup() {
             dns: vec![],
             mtu: Some(1420),
             fwmark: None,
-            transport: "udp".to_string(),
+            transport: Some("udp".to_string()),
             quic: None,
             post_quantum: PostQuantumMode::default(),
             mesh: None,
@@ -70,6 +70,7 @@ fn test_config_to_device_setup() {
                     quic_port: None,
                     role: None,
                     relay_for: Vec::new(),
+                    acl: None,
                 },
                 PeerConfig {
                     public_key: pk_b_hex.clone(),
@@ -82,8 +83,12 @@ fn test_config_to_device_setup() {
                     quic_port: None,
                     role: None,
                     relay_for: Vec::new(),
+                    acl: None,
                 },
             ],
+            masquerade: Masquerade::default(),
+            post_up: Vec::new(),
+            post_down: Vec::new(),
         },
     );
 
@@ -301,4 +306,65 @@ fn test_conf_import_to_device() {
     assert!(wg.get_peer_handle(&pk).is_some());
 
     wg.down();
+}
+
+// -- PeerAcl tests --
+
+#[test]
+fn peer_acl_deserialize() {
+    let json = r#"{"acl": {"allow_destinations": ["10.0.0.0/24", "192.168.1.0/24"]}}"#;
+    #[derive(serde::Deserialize)]
+    struct W {
+        acl: Option<ironguard_config::PeerAcl>,
+    }
+    let w: W = serde_json::from_str(json).unwrap();
+    let acl = w.acl.unwrap();
+    assert_eq!(
+        acl.allow_destinations,
+        vec!["10.0.0.0/24", "192.168.1.0/24"]
+    );
+}
+
+#[test]
+fn peer_acl_absent() {
+    let json = r#"{}"#;
+    #[derive(serde::Deserialize)]
+    struct W {
+        #[serde(default)]
+        acl: Option<ironguard_config::PeerAcl>,
+    }
+    let w: W = serde_json::from_str(json).unwrap();
+    assert!(w.acl.is_none());
+}
+
+#[test]
+fn post_up_down_deserialize() {
+    let json = r#"{"post_up": ["echo up %i"], "post_down": ["echo down %i"]}"#;
+    #[derive(serde::Deserialize)]
+    struct W {
+        #[serde(default)]
+        post_up: Vec<String>,
+        #[serde(default)]
+        post_down: Vec<String>,
+    }
+    let w: W = serde_json::from_str(json).unwrap();
+    assert_eq!(w.post_up, vec!["echo up %i"]);
+    assert_eq!(w.post_down, vec!["echo down %i"]);
+}
+
+#[test]
+fn quic_config_port_optional() {
+    let json = r#"{"sni": "test.com"}"#;
+    let qc: ironguard_config::types::QuicConfig = serde_json::from_str(json).unwrap();
+    assert!(qc.port.is_none());
+}
+
+#[test]
+fn quic_config_cert_fields() {
+    let json =
+        r#"{"port": 51821, "cert_file": "a.crt", "key_file": "a.key", "peer_certs": ["b.crt"]}"#;
+    let qc: ironguard_config::types::QuicConfig = serde_json::from_str(json).unwrap();
+    assert_eq!(qc.cert_file.as_deref(), Some("a.crt"));
+    assert_eq!(qc.key_file.as_deref(), Some("a.key"));
+    assert_eq!(qc.peer_certs, vec!["b.crt"]);
 }

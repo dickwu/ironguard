@@ -258,7 +258,8 @@ async fn cmd_up(
         .as_ref()
         .ok_or_else(|| anyhow!("up requires a [quic] config section"))?;
 
-    let bind_addr: SocketAddr = format!("0.0.0.0:{}", quic_cfg.port).parse().unwrap();
+    let bind_addr: SocketAddr =
+        format!("0.0.0.0:{}", quic_cfg.port.unwrap_or(0)).parse().unwrap();
     let session_config = QuicSessionConfig {
         bind_addr,
         alpn: quic_cfg
@@ -537,7 +538,8 @@ async fn cmd_up(
         .as_ref()
         .ok_or_else(|| anyhow!("up requires a [quic] config section"))?;
 
-    let bind_addr: SocketAddr = format!("0.0.0.0:{}", quic_cfg.port).parse().unwrap();
+    let bind_addr: SocketAddr =
+        format!("0.0.0.0:{}", quic_cfg.port.unwrap_or(0)).parse().unwrap();
     let session_config = QuicSessionConfig {
         bind_addr,
         alpn: quic_cfg
@@ -824,7 +826,7 @@ fn print_interface_status(name: &str, ic: &ironguard_config::types::InterfaceCon
     if let Some(port) = ic.listen_port {
         eprintln!("  listening port: {port}");
     }
-    eprintln!("  transport: {}", ic.transport);
+    eprintln!("  transport: {}", ic.transport.as_deref().unwrap_or("udp"));
     eprintln!("  peers: {}", ic.peers.len());
     for (i, peer) in ic.peers.iter().enumerate() {
         eprintln!("  peer {i}:");

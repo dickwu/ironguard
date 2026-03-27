@@ -25,8 +25,8 @@ pub struct InterfaceConfig {
     pub mtu: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fwmark: Option<u32>,
-    #[serde(default = "default_transport")]
-    pub transport: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quic: Option<QuicConfig>,
     #[serde(default)]
@@ -35,11 +35,21 @@ pub struct InterfaceConfig {
     pub mesh: Option<MeshConfig>,
     #[serde(default)]
     pub peers: Vec<PeerConfig>,
+
+    #[serde(default, skip_serializing_if = "Masquerade::is_disabled")]
+    pub masquerade: Masquerade,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub post_up: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub post_down: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuicConfig {
-    pub port: u16,
+    #[serde(default)]
+    pub port: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sni: Option<String>,
     /// ALPN protocol identifier for the QUIC handshake.
@@ -57,6 +67,15 @@ pub struct QuicConfig {
     /// If true, use QUIC datagrams only (no streams).
     #[serde(default)]
     pub datagram_only: bool,
+    /// Path to the mTLS certificate file (PEM) for peer authentication.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cert_file: Option<String>,
+    /// Path to the mTLS private key file (PEM) for peer authentication.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_file: Option<String>,
+    /// Trusted peer certificate paths (PEM) for mTLS verification.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub peer_certs: Vec<String>,
 }
 
 /// Controls how the QUIC session is used relative to the data plane.
@@ -121,10 +140,16 @@ pub struct PeerConfig {
     /// Public keys of peers that this peer can relay traffic for.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub relay_for: Vec<String>,
+    /// Access control list restricting which destinations this peer may reach.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acl: Option<PeerAcl>,
 }
 
-fn default_transport() -> String {
-    "udp".to_string()
+/// Per-peer access control list: restricts which destination CIDRs a peer
+/// is allowed to send traffic to.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PeerAcl {
+    pub allow_destinations: Vec<String>,
 }
 
 /// Controls whether outbound masquerading (NAT) is applied to tunnel traffic.

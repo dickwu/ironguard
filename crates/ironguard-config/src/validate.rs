@@ -107,7 +107,7 @@ fn is_valid_cidr(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{InterfaceConfig, PeerConfig, PostQuantumMode};
+    use crate::types::{InterfaceConfig, Masquerade, PeerConfig, PostQuantumMode};
     use std::collections::HashMap;
 
     fn make_config(
@@ -127,7 +127,7 @@ mod tests {
                 dns: vec![],
                 mtu: None,
                 fwmark: None,
-                transport: "udp".to_string(),
+                transport: Some("udp".to_string()),
                 quic: None,
                 post_quantum: PostQuantumMode::default(),
                 mesh: None,
@@ -142,7 +142,11 @@ mod tests {
                     quic_port: None,
                     role: None,
                     relay_for: Vec::new(),
+                    acl: None,
                 }],
+                masquerade: Masquerade::default(),
+                post_up: Vec::new(),
+                post_down: Vec::new(),
             },
         );
 

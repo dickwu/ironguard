@@ -5,7 +5,7 @@ pub mod validate;
 
 pub use conf::{export_conf, import_conf};
 pub use keys::{decode_key, load_preshared_key, load_private_key};
-pub use types::{Config, Masquerade};
+pub use types::{Config, Masquerade, PeerAcl};
 pub use validate::validate;
 
 #[cfg(test)]
