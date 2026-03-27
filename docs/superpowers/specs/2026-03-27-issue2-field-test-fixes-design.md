@@ -116,6 +116,9 @@ pub trait NetworkManager: Send + Sync {
     fn remove_route(&self, iface: &str, dest: IpAddr, prefix_len: u8) -> Result<()>;
     fn add_masquerade(&self, tun_iface: &str, tun_subnet: &str, out_ifaces: &[String]) -> Result<()>;
     fn remove_masquerade(&self, tun_iface: &str) -> Result<()>;
+    /// Run a shell command with %i replaced by the interface name.
+    /// Timeout: 30 seconds. Runs via tokio::task::spawn_blocking to avoid
+    /// stalling the async runtime.
     fn run_hook(&self, command: &str, iface: &str) -> Result<()>;
 }
 ```
@@ -164,28 +167,42 @@ Records all calls into `Vec<NetManagerOp>` for test assertions. No real syscalls
 fallback `wildcards.first().copied()` that always returns peer 0 when IP lookup
 fails.
 
-**Fix**: Two changes:
+**Fix**: Three changes:
 
-1. **Extract peer identity from QUIC TLS.** During the QUIC handshake, the
-   client presents a certificate containing its WireGuard public key. Read this
-   via `quinn::Connection::peer_identity()` and use it as the primary peer
-   identification method.
+**Prerequisite — Enable mutual TLS (mTLS).** The current QUIC setup uses
+`with_no_client_auth()` (in `session/quic.rs` and hardcoded in `cmd_up` via
+`make_test_server_config()`). The server never requests client certificates,
+so `peer_identity()` always returns `None`. This must change:
 
-   **Certificate format**: IronGuard's QUIC certificates embed the 32-byte
-   WireGuard public key in the X.509 Subject Common Name (CN) field as a
-   base64-encoded string. `extract_wg_pubkey_from_cert` parses the DER cert
-   with `x509-parser`, reads the CN, and base64-decodes it to `[u8; 32]`.
-   This matches how `ironguard genkey` already generates QUIC certs.
+- **New function `make_mtls_server_config()`** in `session/quic.rs`: configures
+  `rustls::ServerConfig` with `with_client_cert_verifier(...)` requiring a client
+  cert signed by a known CA or self-signed by a known peer. Accept certs whose CN
+  matches any configured peer's WireGuard public key (base64-encoded).
+- **New CLI command `ironguard gen-quic-cert`**: generates a self-signed X.509
+  certificate with the WireGuard public key embedded in the Subject CN field as
+  base64. Outputs cert + key PEM files. The existing `ironguard genkey` generates
+  raw X25519 keys only — it does NOT generate TLS certs (correcting a previous
+  incorrect assumption).
+- **Config additions to `QuicConfig`**: `cert_file` and `key_file` fields for the
+  node's own TLS identity, `peer_ca_file` or `peer_certs` for trusted peer certs.
+- **`cmd_up` changes**: Replace `make_test_server_config()` with
+  `make_mtls_server_config()` on both macOS (~line 425) and Linux (~line 698).
+  Client-side: use `make_mtls_client_config()` with the client's own cert.
+
+1. **Extract peer identity from QUIC TLS.** After mTLS is enabled, the client
+   presents a certificate during the QUIC handshake. Read the peer's WireGuard
+   public key from the certificate CN via `quinn::Connection::peer_identity()`.
 
 ```rust
-// session/tasks.rs — quic_accept_loop
+// session/quic.rs — new helper
 fn extract_peer_identity(conn: &quinn::Connection) -> Option<[u8; 32]> {
-    let certs = conn.peer_identity()?.downcast::<Vec<rustls::pki_types::CertificateDer>>().ok()?;
+    let certs = conn.peer_identity()?
+        .downcast::<Vec<rustls::pki_types::CertificateDer>>().ok()?;
     let cert = certs.first()?;
-    extract_wg_pubkey_from_cert(cert) // parse CN, base64-decode to [u8; 32]
+    extract_wg_pubkey_from_cert(cert) // x509-parser: read CN, base64-decode to [u8; 32]
 }
 
-// In the accept loop:
+// session/tasks.rs — quic_accept_loop
 let peer_pk = match extract_peer_identity(&quic_connection) {
     Some(pk) if known_peer_pks.contains(&pk) => pk,
     _ => {
@@ -201,31 +218,54 @@ let peer_pk = match extract_peer_identity(&quic_connection) {
 2. **Remove the wildcard fallback entirely** from `lookup_by_addr`. If neither
    identity extraction nor IP lookup matches, reject the connection.
 
+3. **New dependency**: `x509-parser` crate in `ironguard-core/Cargo.toml` for
+   certificate CN extraction.
+
 ### 3b. Userspace Per-Peer ACL (Feature #5)
 
-Destination filter in the router send path using the existing `treebitmap` LPM
-table type.
+Destination filter in **both directions** using the existing `treebitmap` LPM
+table type (`RoutingTable<()>` from `router/route.rs`).
 
 ```rust
 // router/peer.rs
 pub struct PeerInner<C: Callbacks, T: Tun, B: Udp> {
     // ... existing fields ...
-    pub acl_destinations: Option<AllowedIps<()>>,
+    /// Destination CIDRs this peer is allowed to reach. None = unrestricted.
+    pub acl_destinations: Option<RoutingTable<()>>,
 }
 ```
+
+**Outbound check** (TUN → encrypt → UDP): filters packets being SENT TO this peer.
 
 ```rust
 // router/send.rs — after peer is resolved, before encryption
 if let Some(ref acl) = peer.acl_destinations {
     let dst_ip = extract_dst_ip(packet);
     if acl.longest_match(dst_ip).is_none() {
-        return; // drop silently
+        return; // destination not in this peer's ACL — drop
     }
 }
 ```
 
-**Performance**: One `treebitmap` LPM lookup (~50ns) per outbound packet.
-Negligible vs ChaCha20 encryption (~200ns for 1400B). No connection tracking.
+**Inbound check** (UDP → decrypt → TUN): filters packets RECEIVED FROM this peer.
+Without this, a malicious peer can send packets to disallowed destinations that
+bypass the outbound ACL after decryption.
+
+```rust
+// router/receive.rs — in sequential_work(), after decryption, before TUN write
+// The existing check_route validates SOURCE IP matches peer's allowed_ips.
+// Add a second check: DESTINATION IP must be in peer's ACL (if configured).
+if let Some(ref acl) = peer.acl_destinations {
+    let dst_ip = extract_dst_ip(decrypted_packet);
+    if acl.longest_match(dst_ip).is_none() {
+        return; // peer not allowed to reach this destination — drop
+    }
+}
+```
+
+**Performance**: One `RoutingTable` LPM lookup (~50ns estimate, pending benchmark)
+per packet per direction. Negligible vs ChaCha20 encryption (~200ns for 1400B).
+No connection tracking needed — this is stateless destination filtering.
 
 **Configuration**: `set_acl_destinations(Some(table))` when peer is configured.
 `None` = unrestricted (current behavior, zero overhead — the `if let` short-circuits).
@@ -239,9 +279,28 @@ The core crate needs to support running without a `SessionManager`:
 pub session_manager: Option<SessionManager>,
 ```
 
-The existing `#[cfg(feature = "legacy-wireguard")]` guards on the handshake
-path already support this. When `transport == "udp"`, the CLI passes `None`
-for the session manager and relies on the legacy Noise handshake.
+**Critical: the UDP path requires wiring the legacy Noise handshake.** The
+current `cmd_up` is QUIC-only — there is no code that starts the Noise handshake
+workers or triggers initial handshakes. For `transport == "udp"` to produce a
+working tunnel, `cmd_up` must:
+
+1. Create the `handshake::Device` with the local static key and all peer public
+   keys + PSKs (this already exists behind `#[cfg(feature = "legacy-wireguard")]`).
+2. Spawn `handshake_worker` threads (from `workers.rs`) to process the handshake
+   queue — these produce keypairs that get installed into the router.
+3. For each peer with a configured `endpoint`, trigger an initial handshake by
+   calling `wg.begin_handshake(peer_handle)` (or equivalent) so that the client
+   actively connects to the server.
+4. Bind UDP sockets via `PlatformUdp::bind(listen_port)` and spawn `udp_worker`
+   threads to receive handshake + transport packets.
+
+The `#[cfg(feature = "legacy-wireguard")]` guards in the core crate already
+support this — the handshake module, worker functions, and keypair installation
+callbacks all exist. The gap is purely in `cmd_up` which never calls them.
+
+**Requires `legacy-wireguard` feature**: If built with `--no-default-features`
+(which disables the legacy handshake), `transport: "udp"` must emit a clear
+error: "UDP transport requires the legacy-wireguard feature".
 
 ---
 
@@ -261,10 +320,20 @@ let transport = iface_cfg.transport.as_str();
 let session_manager = if transport == "quic" {
     let quic_cfg = iface_cfg.quic.as_ref()
         .ok_or_else(|| anyhow!("transport \"quic\" requires a [quic] config section"))?;
-    // ... existing QUIC setup ...
+    // Resolve QUIC port: explicit > listen_port + 1 > error
+    let quic_port = quic_cfg.port.or_else(|| iface_cfg.listen_port.map(|p| p + 1))
+        .ok_or_else(|| anyhow!("QUIC transport requires quic.port or listen_port"))?;
+    // ... existing QUIC setup using quic_port ...
     Some(manager)
 } else {
-    // UDP: legacy Noise handshake, no SessionManager
+    // UDP: wire legacy Noise handshake (requires legacy-wireguard feature)
+    #[cfg(not(feature = "legacy-wireguard"))]
+    return Err(anyhow!("UDP transport requires the legacy-wireguard feature"));
+
+    // 1. Create handshake device with local key + peer keys
+    // 2. Spawn handshake_worker threads
+    // 3. Bind UDP sockets, spawn udp_worker threads
+    // 4. Trigger initial handshakes for peers with configured endpoints
     None
 };
 ```
@@ -284,26 +353,34 @@ for addr_str in &iface_cfg.address {
 }
 
 // Add routes for each peer's allowed_ips
+// SAFETY: skip 0.0.0.0/0 and ::/0 — these require policy routing (fwmark)
+// to avoid routing loops. Log a warning if encountered.
 for peer_cfg in &iface_cfg.peers {
     for allowed_ip in &peer_cfg.allowed_ips {
         let (dest, prefix_len) = parse_cidr(allowed_ip)?;
+        if prefix_len == 0 {
+            warn!("skipping default route {allowed_ip} — use PostUp for catch-all routing");
+            continue;
+        }
         net_mgr.add_route(&iface_name, dest, prefix_len)?;
         info!("route {allowed_ip} via {iface_name}");
     }
 }
 
 // Enable masquerade if configured
+let tun_subnet = iface_cfg.address.first()
+    .ok_or_else(|| anyhow!("masquerade requires at least one interface address"))?;
 match &iface_cfg.masquerade {
     Masquerade::All(true) => {
-        net_mgr.add_masquerade(&iface_name, &iface_cfg.address[0], &[])?;
+        net_mgr.add_masquerade(&iface_name, tun_subnet, &[])?;
     }
     Masquerade::Interfaces(ifaces) => {
-        net_mgr.add_masquerade(&iface_name, &iface_cfg.address[0], ifaces)?;
+        net_mgr.add_masquerade(&iface_name, tun_subnet, ifaces)?;
     }
     _ => {}
 }
 
-// Run PostUp hooks
+// Run PostUp hooks (30s timeout per hook, via spawn_blocking)
 for cmd in &iface_cfg.post_up {
     net_mgr.run_hook(cmd, &iface_name)?;
 }
@@ -369,7 +446,17 @@ for addr_str in &iface_cfg.address {
 // 5. TUN device dropped automatically
 ```
 
-The Ctrl+C signal handler calls the same cleanup path.
+The Ctrl+C signal handler calls the same cleanup path. The `cmd_up` function
+stores `Arc<NetworkManager>`, `iface_name`, and `iface_cfg` (cloned) in the
+signal handler closure so cleanup can proceed even if the main task panics.
+
+**Crash recovery**: If the process is killed (SIGKILL) or panics before the
+signal handler runs, routes/addresses/masquerade rules are orphaned. On the
+next `cmd_up` for the same interface, perform idempotent cleanup first:
+call `remove_masquerade`, `remove_route`, and `remove_address` for the
+configured values before starting setup. This is safe because all
+`NetworkManager` methods are idempotent — removing non-existent state is a
+no-op.
 
 ---
 
@@ -427,9 +514,11 @@ Add: `NetworkManager` trait, new config fields, transport branching, `configs/` 
 | Area | Tests |
 |---|---|
 | Config schema | Deserialize all new fields (masquerade variants, acl, post_up/post_down). Round-trip serde. Validation rejects bad CIDRs. `QuicConfig.port` defaults to `None`. |
-| ACL filter | `AllowedIps` ACL table: matching IPs pass, non-matching drop. `None` = unrestricted. IPv4 + IPv6. |
-| PeerLookup | Correct peer for known IP. `None` for unknown IP. No wildcard fallback. |
-| Masquerade enum | Serde parses `false`, `true`, `["en0"]`, absent field correctly. |
+| ACL filter | `RoutingTable<()>` ACL: matching IPs pass, non-matching drop. `None` = unrestricted. IPv4 + IPv6. Test BOTH send and receive directions. |
+| PeerLookup | Correct peer for known IP. `None` for unknown IP. No wildcard fallback. Test with multiple wildcard peers — must return `None`, not first. |
+| Masquerade enum | Serde parses `false`, `true`, `["en0"]`, absent field correctly. Verify `null` is rejected. |
+| mTLS cert | Generate cert with WG pubkey in CN. Round-trip: generate → parse → extract → matches original key. |
+| QuicConfig.port | `None` when omitted. Resolves to `listen_port + 1`. Error when both absent with QUIC transport. |
 
 ### Integration Tests (dummy platform)
 
@@ -439,8 +528,11 @@ Add: `NetworkManager` trait, new config fields, transport branching, `configs/` 
 | Cleanup ordering | `cmd_down` calls in reverse: post_down → masquerade → routes → addresses |
 | UDP transport | Config with `transport: "udp"`, no `quic` block → starts without error |
 | QUIC transport | Config with `transport: "quic"` + `quic` block → `SessionManager` created |
-| ACL enforcement | Two-peer dummy setup, restricted peer packet to disallowed dest → dropped |
-| Multi-peer QUIC | Two connections with different identities → keypairs to correct peers |
+| ACL enforcement (outbound) | Restricted peer sends to disallowed dest via TUN→encrypt path → dropped |
+| ACL enforcement (inbound) | Restricted peer's decrypted packet to disallowed dest → dropped before TUN write |
+| Multi-peer QUIC | Two mTLS connections with different cert CNs → keypairs to correct peers |
+| Crash recovery | Simulate stale routes/addresses from previous run → `cmd_up` cleans before setup |
+| Default route guard | Config with `0.0.0.0/0` in allowed_ips → route skipped with warning |
 
 ### Field Test via `/tunnel-perf`
 
@@ -468,9 +560,15 @@ ACL enforcement and masquerade field-tested later on the office Mac with LAN acc
 
 | Crate | Files | Nature |
 |---|---|---|
-| `ironguard-config` | `types.rs`, `validate.rs` | New fields, new validation |
+| `ironguard-config` | `types.rs`, `validate.rs`, `Cargo.toml` | New fields, new validation |
 | `ironguard-platform` | `net_manager.rs` (new), `macos/net_manager.rs` (new), `linux/net_manager.rs` (new), `dummy/net_manager.rs` (new), `macos/mod.rs`, `linux/mod.rs`, `dummy/mod.rs` | New trait + 3 implementations |
-| `ironguard-core` | `session/tasks.rs`, `router/peer.rs`, `router/send.rs`, `device.rs` | Bug fixes + ACL filter |
-| `ironguard-cli` | `main.rs` | Transport branching, address/route/masquerade/hook wiring, cleanup |
+| `ironguard-core` | `session/tasks.rs`, `session/quic.rs`, `router/peer.rs`, `router/send.rs`, `router/receive.rs`, `device.rs`, `Cargo.toml` | Bug fixes, mTLS, ACL filter (both directions) |
+| `ironguard-cli` | `main.rs` | Transport branching, Noise handshake wiring, address/route/masquerade/hook wiring, cleanup, crash recovery |
 | root | `README.md`, `CLAUDE.md` | Doc fixes |
 | root | `configs/` (new directory, 5 files) | Example configs + service files |
+
+### New Dependencies
+
+| Crate | Dependency | Purpose |
+|---|---|---|
+| `ironguard-core` | `x509-parser` | Extract WG pubkey from QUIC client cert CN |
