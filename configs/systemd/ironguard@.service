@@ -1,0 +1,13 @@
+[Unit]
+Description=IronGuard VPN tunnel %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/ironguard up %i --config /etc/ironguard/%i.json --foreground
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
