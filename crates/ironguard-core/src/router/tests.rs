@@ -1137,8 +1137,8 @@ async fn test_forwarding_disabled_delivers_to_tun() {
 
 #[test]
 fn acl_routing_table_as_filter() {
-    use std::net::{IpAddr, Ipv4Addr};
     use super::route::RoutingTable;
+    use std::net::{IpAddr, Ipv4Addr};
 
     let acl: RoutingTable<()> = RoutingTable::new();
     acl.insert(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0)), 24, ());

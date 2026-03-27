@@ -202,10 +202,7 @@ impl<'de> Deserialize<'de> for Masquerade {
                 })
             }
 
-            fn visit_seq<A: de::SeqAccess<'de>>(
-                self,
-                mut seq: A,
-            ) -> Result<Masquerade, A::Error> {
+            fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Masquerade, A::Error> {
                 let mut ifaces = Vec::new();
                 while let Some(s) = seq.next_element::<String>()? {
                     ifaces.push(s);

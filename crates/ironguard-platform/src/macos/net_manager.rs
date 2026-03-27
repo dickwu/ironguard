@@ -69,25 +69,21 @@ fn run_idempotent(cmd: &mut Command) -> Result<()> {
 impl NetworkManager for MacosNetManager {
     fn add_address(&self, iface: &str, addr: IpAddr, prefix_len: u8) -> Result<()> {
         match addr {
-            IpAddr::V4(v4) => {
-                run_idempotent(
-                    Command::new("ifconfig")
-                        .arg(iface)
-                        .arg("inet")
-                        .arg(format!("{}/{}", v4, prefix_len))
-                        .arg(v4.to_string()),
-                )
-            }
-            IpAddr::V6(v6) => {
-                run_idempotent(
-                    Command::new("ifconfig")
-                        .arg(iface)
-                        .arg("inet6")
-                        .arg(v6.to_string())
-                        .arg("prefixlen")
-                        .arg(prefix_len.to_string()),
-                )
-            }
+            IpAddr::V4(v4) => run_idempotent(
+                Command::new("ifconfig")
+                    .arg(iface)
+                    .arg("inet")
+                    .arg(format!("{}/{}", v4, prefix_len))
+                    .arg(v4.to_string()),
+            ),
+            IpAddr::V6(v6) => run_idempotent(
+                Command::new("ifconfig")
+                    .arg(iface)
+                    .arg("inet6")
+                    .arg(v6.to_string())
+                    .arg("prefixlen")
+                    .arg(prefix_len.to_string()),
+            ),
         }
     }
 
@@ -150,8 +146,8 @@ impl NetworkManager for MacosNetManager {
         }
 
         // Write to a temp file, then load via pfctl.
-        let mut tmp = tempfile::NamedTempFile::new()
-            .context("failed to create temp file for PF rules")?;
+        let mut tmp =
+            tempfile::NamedTempFile::new().context("failed to create temp file for PF rules")?;
         tmp.write_all(rules.as_bytes())
             .context("failed to write PF rules")?;
         tmp.flush()?;

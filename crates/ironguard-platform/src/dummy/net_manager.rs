@@ -23,12 +23,18 @@ impl DummyNetManager {
 
     /// Return a snapshot of all recorded operations.
     pub fn ops(&self) -> Vec<NetManagerOp> {
-        self.ops.lock().expect("DummyNetManager lock poisoned").clone()
+        self.ops
+            .lock()
+            .expect("DummyNetManager lock poisoned")
+            .clone()
     }
 
     /// Clear the operation log.
     pub fn clear(&self) {
-        self.ops.lock().expect("DummyNetManager lock poisoned").clear();
+        self.ops
+            .lock()
+            .expect("DummyNetManager lock poisoned")
+            .clear();
     }
 }
 

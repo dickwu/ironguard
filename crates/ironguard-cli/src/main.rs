@@ -1043,8 +1043,7 @@ fn cmd_gen_quic_cert(key_path: &str, out_cert: &str, out_key: &str) -> Result<()
 
     // Write PEM-encoded private key
     let key_pem = pem::encode(&pem::Pem::new("PRIVATE KEY", key_der.secret_der()));
-    std::fs::write(out_key, &key_pem)
-        .with_context(|| format!("failed to write key: {out_key}"))?;
+    std::fs::write(out_key, &key_pem).with_context(|| format!("failed to write key: {out_key}"))?;
 
     eprintln!("Generated mTLS certificate:");
     eprintln!("  cert: {out_cert}");

@@ -331,8 +331,8 @@ pub fn generate_wg_cert(
         .push(rcgen::DnType::CommonName, cn);
     params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
 
-    let key_pair =
-        rcgen::KeyPair::generate().map_err(|e| SessionError::QuicDatagram(format!("keygen: {e}")))?;
+    let key_pair = rcgen::KeyPair::generate()
+        .map_err(|e| SessionError::QuicDatagram(format!("keygen: {e}")))?;
     let cert = params
         .self_signed(&key_pair)
         .map_err(|e| SessionError::QuicDatagram(format!("self-sign: {e}")))?;

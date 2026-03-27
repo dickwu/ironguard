@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::path::Path;
 
 use crate::types::Config;
@@ -380,13 +380,8 @@ mod tests {
 
     #[test]
     fn test_validate_udp_transport_rejected() {
-        let mut config =
-            make_config(None, &hex::encode([0xABu8; 32]), vec!["10.0.0.0/24"], None);
-        config
-            .interfaces
-            .get_mut("wg0")
-            .unwrap()
-            .transport = Some("udp".to_string());
+        let mut config = make_config(None, &hex::encode([0xABu8; 32]), vec!["10.0.0.0/24"], None);
+        config.interfaces.get_mut("wg0").unwrap().transport = Some("udp".to_string());
 
         let result = validate(&config);
         assert!(result.is_err(), "UDP transport must be rejected");
@@ -399,13 +394,8 @@ mod tests {
 
     #[test]
     fn test_validate_quic_transport_deprecated_warning() {
-        let mut config =
-            make_config(None, &hex::encode([0xABu8; 32]), vec!["10.0.0.0/24"], None);
-        config
-            .interfaces
-            .get_mut("wg0")
-            .unwrap()
-            .transport = Some("quic".to_string());
+        let mut config = make_config(None, &hex::encode([0xABu8; 32]), vec!["10.0.0.0/24"], None);
+        config.interfaces.get_mut("wg0").unwrap().transport = Some("quic".to_string());
 
         let warnings = validate(&config).unwrap();
         assert!(
@@ -416,8 +406,7 @@ mod tests {
 
     #[test]
     fn test_validate_missing_quic_config_warning() {
-        let mut config =
-            make_config(None, &hex::encode([0xABu8; 32]), vec!["10.0.0.0/24"], None);
+        let mut config = make_config(None, &hex::encode([0xABu8; 32]), vec!["10.0.0.0/24"], None);
         config.interfaces.get_mut("wg0").unwrap().quic = None;
 
         let warnings = validate(&config).unwrap();
@@ -429,8 +418,7 @@ mod tests {
 
     #[test]
     fn test_validate_quic_port_overflow() {
-        let mut config =
-            make_config(None, &hex::encode([0xABu8; 32]), vec!["10.0.0.0/24"], None);
+        let mut config = make_config(None, &hex::encode([0xABu8; 32]), vec!["10.0.0.0/24"], None);
         let iface = config.interfaces.get_mut("wg0").unwrap();
         iface.listen_port = Some(65535);
         // quic.port is None so the default (listen_port + 1) would overflow
@@ -445,8 +433,7 @@ mod tests {
 
     #[test]
     fn test_validate_quic_cert_file_without_key_file() {
-        let mut config =
-            make_config(None, &hex::encode([0xABu8; 32]), vec!["10.0.0.0/24"], None);
+        let mut config = make_config(None, &hex::encode([0xABu8; 32]), vec!["10.0.0.0/24"], None);
         let quic = config
             .interfaces
             .get_mut("wg0")
@@ -468,8 +455,7 @@ mod tests {
 
     #[test]
     fn test_validate_quic_key_file_without_cert_file() {
-        let mut config =
-            make_config(None, &hex::encode([0xABu8; 32]), vec!["10.0.0.0/24"], None);
+        let mut config = make_config(None, &hex::encode([0xABu8; 32]), vec!["10.0.0.0/24"], None);
         let quic = config
             .interfaces
             .get_mut("wg0")
@@ -491,13 +477,9 @@ mod tests {
 
     #[test]
     fn test_validate_acl_bad_cidr() {
-        let mut config =
-            make_config(None, &hex::encode([0xABu8; 32]), vec!["10.0.0.0/24"], None);
+        let mut config = make_config(None, &hex::encode([0xABu8; 32]), vec!["10.0.0.0/24"], None);
         config.interfaces.get_mut("wg0").unwrap().peers[0].acl = Some(PeerAcl {
-            allow_destinations: vec![
-                "10.0.0.0/24".to_string(),
-                "not-a-cidr".to_string(),
-            ],
+            allow_destinations: vec!["10.0.0.0/24".to_string(), "not-a-cidr".to_string()],
         });
 
         let warnings = validate(&config).unwrap();
@@ -511,8 +493,7 @@ mod tests {
 
     #[test]
     fn test_validate_acl_valid_cidrs() {
-        let mut config =
-            make_config(None, &hex::encode([0xABu8; 32]), vec!["10.0.0.0/24"], None);
+        let mut config = make_config(None, &hex::encode([0xABu8; 32]), vec!["10.0.0.0/24"], None);
         config.interfaces.get_mut("wg0").unwrap().peers[0].acl = Some(PeerAcl {
             allow_destinations: vec!["10.0.0.0/24".to_string(), "fd00::/64".to_string()],
         });
@@ -526,8 +507,7 @@ mod tests {
 
     #[test]
     fn test_validate_masquerade_requires_address() {
-        let mut config =
-            make_config(None, &hex::encode([0xABu8; 32]), vec!["10.0.0.0/24"], None);
+        let mut config = make_config(None, &hex::encode([0xABu8; 32]), vec!["10.0.0.0/24"], None);
         let iface = config.interfaces.get_mut("wg0").unwrap();
         iface.masquerade = Masquerade::All;
         iface.address = vec![]; // empty address
@@ -543,8 +523,7 @@ mod tests {
 
     #[test]
     fn test_validate_post_up_missing_percent_i() {
-        let mut config =
-            make_config(None, &hex::encode([0xABu8; 32]), vec!["10.0.0.0/24"], None);
+        let mut config = make_config(None, &hex::encode([0xABu8; 32]), vec!["10.0.0.0/24"], None);
         config.interfaces.get_mut("wg0").unwrap().post_up =
             vec!["iptables -A FORWARD -i wg0 -j ACCEPT".to_string()];
 
@@ -559,8 +538,7 @@ mod tests {
 
     #[test]
     fn test_validate_post_down_missing_percent_i() {
-        let mut config =
-            make_config(None, &hex::encode([0xABu8; 32]), vec!["10.0.0.0/24"], None);
+        let mut config = make_config(None, &hex::encode([0xABu8; 32]), vec!["10.0.0.0/24"], None);
         config.interfaces.get_mut("wg0").unwrap().post_down =
             vec!["iptables -D FORWARD -i wg0 -j ACCEPT".to_string()];
 
@@ -575,8 +553,7 @@ mod tests {
 
     #[test]
     fn test_validate_post_up_with_percent_i_no_warning() {
-        let mut config =
-            make_config(None, &hex::encode([0xABu8; 32]), vec!["10.0.0.0/24"], None);
+        let mut config = make_config(None, &hex::encode([0xABu8; 32]), vec!["10.0.0.0/24"], None);
         config.interfaces.get_mut("wg0").unwrap().post_up =
             vec!["iptables -A FORWARD -i %i -j ACCEPT".to_string()];
 
