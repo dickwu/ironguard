@@ -4,7 +4,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::keys::{base64_encode, load_private_key};
-use crate::types::{Config, InterfaceConfig, PeerConfig, PostQuantumMode};
+use crate::types::{Config, InterfaceConfig, Masquerade, PeerConfig, PostQuantumMode};
 
 /// Parse a standard WireGuard `.conf` file and return an IronGuard `Config`.
 ///
@@ -208,7 +208,10 @@ fn parse_conf_content(
         dns,
         mtu,
         fwmark,
-        transport: "udp".to_string(),
+        transport: Some("udp".to_string()),
+        masquerade: Masquerade::default(),
+        post_up: Vec::new(),
+        post_down: Vec::new(),
         quic: None,
         post_quantum: PostQuantumMode::default(),
         mesh: None,
@@ -350,6 +353,7 @@ impl PeerBuilder {
             quic_port: None,
             role: None,
             relay_for: Vec::new(),
+            acl: None,
         })
     }
 }

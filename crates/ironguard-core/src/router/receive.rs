@@ -188,6 +188,14 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> Sequential
         let received_len = msg.1.len();
         if let Some(inner) = inner_length(packet) {
             if inner + SIZE_TAG <= packet.len() {
+                // Per-peer ACL: if set, only allow packets to permitted destinations.
+                if let Some(ref acl) = *peer.acl_destinations.read() {
+                    let ip_data = &packet[..inner];
+                    if acl.get_route(ip_data).is_none() {
+                        C::recv(&peer.opaque, received_len, true, &job.state.keypair);
+                        return;
+                    }
+                }
                 // If forwarding is enabled, check whether the destination
                 // should be forwarded to another peer instead of delivered
                 // locally via TUN.

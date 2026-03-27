@@ -15,4 +15,11 @@ docs/*
 scripts/*
 
 configs/*
+!configs/simple-client-server.json
+!configs/multi-client-quic-server.json
+!configs/lan-routing-server.json
+!configs/systemd/
+!configs/systemd/ironguard@.service
+!configs/launchd/
+!configs/launchd/net.ironguard.plist
 

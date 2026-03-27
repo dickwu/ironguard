@@ -51,15 +51,18 @@ pub trait KeyInstaller: Send + Sync + 'static {
 ///
 /// `known_peers` is consulted to map inbound connections to peer public keys.
 /// Connections from unknown peers are dropped.
+#[allow(clippy::too_many_arguments)]
 pub async fn quic_accept_loop<K: KeyInstaller>(
     endpoint: quinn::Endpoint,
     session_mgr: Arc<SessionManager>,
     key_installer: Arc<K>,
     known_peers: Arc<PeerLookup>,
+    known_peer_pks: std::collections::HashSet<[u8; 32]>,
     data_port: u16,
     stop: Arc<AtomicBool>,
     shutdown: Arc<Notify>,
 ) {
+    let known_peer_pks = Arc::new(known_peer_pks);
     tracing::info!("QUIC accept loop started");
 
     loop {
@@ -87,6 +90,7 @@ pub async fn quic_accept_loop<K: KeyInstaller>(
         let session_mgr = session_mgr.clone();
         let key_installer = key_installer.clone();
         let known_peers = known_peers.clone();
+        let known_peer_pks = known_peer_pks.clone();
         let stop = stop.clone();
 
         // Handle each connection in a separate task so the accept loop
@@ -106,16 +110,20 @@ pub async fn quic_accept_loop<K: KeyInstaller>(
 
             let remote_addr = connection.remote_address();
 
-            // Look up which peer this connection belongs to.
-            let peer_pk = match known_peers.lookup_by_addr(&remote_addr) {
-                Some(pk) => pk,
-                None => {
-                    tracing::warn!(
-                        remote = %remote_addr,
-                        "QUIC accept: unknown peer address, dropping connection"
-                    );
-                    return;
-                }
+            // Identify the peer: prefer mTLS certificate identity, fall back
+            // to address-based lookup.
+            let peer_pk = match crate::session::quic::extract_peer_identity(&connection) {
+                Some(pk) if known_peer_pks.contains(&pk) => pk,
+                _ => match known_peers.lookup_by_addr(&remote_addr) {
+                    Some(pk) => pk,
+                    None => {
+                        tracing::warn!(
+                            remote = %remote_addr,
+                            "QUIC accept: unknown peer, dropping connection"
+                        );
+                        return;
+                    }
+                },
             };
 
             let receiver_id: u32 = rand::random();
@@ -268,9 +276,10 @@ impl PeerLookup {
 
     /// Look up a peer public key by remote address.
     ///
-    /// First checks address-matched entries (IP only, ignoring port since
-    /// QUIC clients use ephemeral source ports). If no match, returns the
-    /// first wildcard peer (server-side peer without endpoint).
+    /// Checks address-matched entries (IP only, ignoring port since QUIC
+    /// clients use ephemeral source ports). Returns `None` if no entry
+    /// matches -- wildcard peers are NOT used as a fallback to avoid
+    /// misrouting in multi-peer configurations.
     pub fn lookup_by_addr(&self, addr: &std::net::SocketAddr) -> Option<[u8; 32]> {
         let entries = self.entries.read();
         for (entry_addr, pk) in entries.iter() {
@@ -278,11 +287,7 @@ impl PeerLookup {
                 return Some(*pk);
             }
         }
-        drop(entries);
-
-        // Fall back to wildcard peers (peers without configured endpoints).
-        let wildcards = self.wildcard_peers.read();
-        wildcards.first().copied()
+        None
     }
 }
 
@@ -358,6 +363,27 @@ mod tests {
     }
 
     #[test]
+    fn lookup_by_addr_no_wildcard_fallback() {
+        let lookup = PeerLookup::new();
+        lookup.add_wildcard([1u8; 32]);
+        lookup.add_wildcard([2u8; 32]);
+        let unknown: std::net::SocketAddr = "203.0.113.1:12345".parse().unwrap();
+        assert!(
+            lookup.lookup_by_addr(&unknown).is_none(),
+            "wildcard peers must not be used as fallback"
+        );
+    }
+
+    #[test]
+    fn lookup_by_addr_ip_match() {
+        let lookup = PeerLookup::new();
+        let addr: std::net::SocketAddr = "10.0.0.1:51820".parse().unwrap();
+        lookup.add(addr, [3u8; 32]);
+        let query: std::net::SocketAddr = "10.0.0.1:9999".parse().unwrap();
+        assert_eq!(lookup.lookup_by_addr(&query), Some([3u8; 32]));
+    }
+
+    #[test]
     fn test_needs_rekey_no_session() {
         let mgr = SessionManager::new(QuicSessionConfig::default());
         assert!(!needs_rekey(&mgr, &[0u8; 32]));
@@ -422,6 +448,7 @@ mod tests {
             session_mgr,
             installer.clone(),
             known_peers,
+            std::collections::HashSet::new(),
             51820,
             stop,
             shutdown_clone,
@@ -503,6 +530,7 @@ mod tests {
             session_mgr,
             installer.clone(),
             known_peers,
+            std::collections::HashSet::new(),
             51820,
             stop,
             shutdown_clone,

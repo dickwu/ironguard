@@ -1,0 +1,22 @@
+{
+  "$schema": "ironguard/v1",
+  "interfaces": {
+    "utun9": {
+      "private_key_file": "./private.key",
+      "listen_port": 51820,
+      "address": ["10.0.0.1/24"],
+      "mtu": 1420,
+      "quic": {
+        "port": 51821
+      },
+      "peers": [
+        {
+          "public_key": "PEER_PUBLIC_KEY_HEX",
+          "endpoint": "vpn.example.com:51820",
+          "allowed_ips": ["10.0.0.2/32"],
+          "persistent_keepalive": 25
+        }
+      ]
+    }
+  }
+}
