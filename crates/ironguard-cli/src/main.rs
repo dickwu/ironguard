@@ -96,6 +96,18 @@ enum Commands {
     Pubkey,
     /// Generate a preshared key
     Genpsk,
+    /// Generate a QUIC mTLS certificate with WireGuard public key in CN
+    GenQuicCert {
+        /// Path to WireGuard private key file
+        #[clap(long)]
+        key: String,
+        /// Output certificate file path
+        #[clap(long, default_value = "quic.crt")]
+        out_cert: String,
+        /// Output TLS private key file path
+        #[clap(long, default_value = "quic.key")]
+        out_key: String,
+    },
     /// Validate a wg.json config file
     Validate {
         /// Path to wg.json
@@ -163,6 +175,13 @@ async fn main() -> Result<()> {
             use rand::RngCore;
             rand::rng().fill_bytes(&mut psk);
             println!("{}", hex::encode(psk));
+        }
+        Commands::GenQuicCert {
+            key,
+            out_cert,
+            out_key,
+        } => {
+            cmd_gen_quic_cert(&key, &out_cert, &out_key)?;
         }
         Commands::Validate { config } => {
             cmd_validate(&config)?;
@@ -757,6 +776,41 @@ async fn cmd_up(
     _mesh_flag: bool,
 ) -> Result<()> {
     eprintln!("Platform not yet supported");
+    Ok(())
+}
+
+fn cmd_gen_quic_cert(key_path: &str, out_cert: &str, out_key: &str) -> Result<()> {
+    use anyhow::Context;
+
+    let key_data = std::fs::read_to_string(key_path)
+        .with_context(|| format!("failed to read key file: {key_path}"))?;
+    let key_hex = key_data.trim();
+    let private_bytes =
+        hex::decode(key_hex).with_context(|| "failed to decode private key as hex")?;
+
+    let secret = x25519_dalek::StaticSecret::from(
+        <[u8; 32]>::try_from(private_bytes.as_slice())
+            .map_err(|_| anyhow!("private key must be 32 bytes"))?,
+    );
+    let public = x25519_dalek::PublicKey::from(&secret);
+    let wg_pk: [u8; 32] = public.to_bytes();
+
+    let (cert_der, key_der) = ironguard_core::session::quic::generate_wg_cert(&wg_pk)
+        .map_err(|e| anyhow!("cert generation failed: {e}"))?;
+
+    // Write PEM-encoded certificate
+    let cert_pem = pem::encode(&pem::Pem::new("CERTIFICATE", cert_der.as_ref()));
+    std::fs::write(out_cert, &cert_pem)
+        .with_context(|| format!("failed to write cert: {out_cert}"))?;
+
+    // Write PEM-encoded private key
+    let key_pem = pem::encode(&pem::Pem::new("PRIVATE KEY", key_der.secret_der()));
+    std::fs::write(out_key, &key_pem)
+        .with_context(|| format!("failed to write key: {out_key}"))?;
+
+    eprintln!("Generated mTLS certificate:");
+    eprintln!("  cert: {out_cert}");
+    eprintln!("  key:  {out_key}");
     Ok(())
 }
 
