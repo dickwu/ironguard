@@ -268,9 +268,10 @@ impl PeerLookup {
 
     /// Look up a peer public key by remote address.
     ///
-    /// First checks address-matched entries (IP only, ignoring port since
-    /// QUIC clients use ephemeral source ports). If no match, returns the
-    /// first wildcard peer (server-side peer without endpoint).
+    /// Checks address-matched entries (IP only, ignoring port since QUIC
+    /// clients use ephemeral source ports). Returns `None` if no entry
+    /// matches -- wildcard peers are NOT used as a fallback to avoid
+    /// misrouting in multi-peer configurations.
     pub fn lookup_by_addr(&self, addr: &std::net::SocketAddr) -> Option<[u8; 32]> {
         let entries = self.entries.read();
         for (entry_addr, pk) in entries.iter() {
@@ -278,11 +279,7 @@ impl PeerLookup {
                 return Some(*pk);
             }
         }
-        drop(entries);
-
-        // Fall back to wildcard peers (peers without configured endpoints).
-        let wildcards = self.wildcard_peers.read();
-        wildcards.first().copied()
+        None
     }
 }
 
@@ -355,6 +352,27 @@ mod tests {
         // Different IP should not match.
         let result = lookup.lookup_by_addr(&"10.0.0.2:51820".parse().unwrap());
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn lookup_by_addr_no_wildcard_fallback() {
+        let lookup = PeerLookup::new();
+        lookup.add_wildcard([1u8; 32]);
+        lookup.add_wildcard([2u8; 32]);
+        let unknown: std::net::SocketAddr = "203.0.113.1:12345".parse().unwrap();
+        assert!(
+            lookup.lookup_by_addr(&unknown).is_none(),
+            "wildcard peers must not be used as fallback"
+        );
+    }
+
+    #[test]
+    fn lookup_by_addr_ip_match() {
+        let lookup = PeerLookup::new();
+        let addr: std::net::SocketAddr = "10.0.0.1:51820".parse().unwrap();
+        lookup.add(addr, [3u8; 32]);
+        let query: std::net::SocketAddr = "10.0.0.1:9999".parse().unwrap();
+        assert_eq!(lookup.lookup_by_addr(&query), Some([3u8; 32]));
     }
 
     #[test]
