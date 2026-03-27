@@ -15,7 +15,7 @@ IronGuard is a from-scratch WireGuard implementation built on Rust 2024 edition 
 - **Standard Config Interop** - Import/export standard WireGuard `.conf` files
 - **QUIC Transport** (feature-gated) - RFC 9298 MASQUE encapsulation via quinn for traversing firewalls that block UDP, with automatic datagram/stream fallback and session management
 - **Zero-Copy Data Path** - In-place transport header construction, `ring` seal_in_place, and pre-allocated buffer pooling for minimal allocation on the hot path
-- **274 Tests** - Unit, integration, protocol-level, and benchmark tests across all modules
+- **302 Tests** - Unit, integration, protocol-level, and benchmark tests across all modules
 
 ## Architecture
 
