@@ -12,6 +12,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 use super::keys::{DataPlaneKeys, Role, derive_initial_keys};
@@ -309,6 +310,75 @@ pub fn make_client_config_pinned(
     Ok(quinn::ClientConfig::new(Arc::new(quic_client_config)))
 }
 
+/// Generate a self-signed X.509 cert with the WireGuard public key in CN.
+///
+/// Sets `is_ca=true` for `WebPkiClientVerifier` trust anchor compatibility.
+/// The CN is the base64-encoded 32-byte WireGuard public key.
+pub fn generate_wg_cert(
+    wg_pubkey: &[u8; 32],
+) -> Result<
+    (
+        rustls::pki_types::CertificateDer<'static>,
+        rustls::pki_types::PrivateKeyDer<'static>,
+    ),
+    SessionError,
+> {
+    let cn = base64::engine::general_purpose::STANDARD.encode(wg_pubkey);
+    let mut params = rcgen::CertificateParams::new(vec!["ironguard".to_string()])
+        .map_err(|e| SessionError::QuicDatagram(format!("cert params: {e}")))?;
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, cn);
+    params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+
+    let key_pair =
+        rcgen::KeyPair::generate().map_err(|e| SessionError::QuicDatagram(format!("keygen: {e}")))?;
+    let cert = params
+        .self_signed(&key_pair)
+        .map_err(|e| SessionError::QuicDatagram(format!("self-sign: {e}")))?;
+
+    let cert_der = rustls::pki_types::CertificateDer::from(cert.der().to_vec());
+    let key_der = rustls::pki_types::PrivateKeyDer::try_from(key_pair.serialize_der())
+        .map_err(|e| SessionError::QuicDatagram(format!("key DER: {e}")))?;
+
+    Ok((cert_der, key_der))
+}
+
+/// Extract WireGuard public key from a certificate's CN field.
+///
+/// Parses the X.509 certificate and looks for a base64-encoded 32-byte
+/// value in the Common Name. Returns `None` if parsing fails or the
+/// decoded value is not exactly 32 bytes.
+pub fn extract_wg_pubkey_from_cert(
+    cert_der: &rustls::pki_types::CertificateDer,
+) -> Option<[u8; 32]> {
+    let (_, cert) = x509_parser::parse_x509_certificate(cert_der).ok()?;
+    let cn = cert.subject().iter_common_name().next()?;
+    let cn_str = cn.as_str().ok()?;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(cn_str)
+        .ok()?;
+    if decoded.len() != 32 {
+        return None;
+    }
+    let mut pk = [0u8; 32];
+    pk.copy_from_slice(&decoded);
+    Some(pk)
+}
+
+/// Extract peer identity from a QUIC connection's client certificate.
+///
+/// Returns the WireGuard public key embedded in the peer's TLS certificate
+/// CN, or `None` if no certificate was presented or parsing fails.
+pub fn extract_peer_identity(conn: &quinn::Connection) -> Option<[u8; 32]> {
+    let certs = conn
+        .peer_identity()?
+        .downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>()
+        .ok()?;
+    let cert = certs.first()?;
+    extract_wg_pubkey_from_cert(cert)
+}
+
 /// Extract the peer's TLS certificate from a QUIC connection (after handshake).
 ///
 /// Returns the DER-encoded end-entity certificate, or an error if no peer
@@ -457,6 +527,23 @@ mod tests {
         assert_eq!(config.alpn, b"ironguard/1".to_vec());
         assert!(config.cert_path.is_none());
         assert!(config.key_path.is_none());
+    }
+
+    #[test]
+    fn generate_wg_cert_roundtrip() {
+        let wg_pk = [42u8; 32];
+        let (cert_der, _key_der) = generate_wg_cert(&wg_pk).unwrap();
+        let extracted = extract_wg_pubkey_from_cert(&cert_der).unwrap();
+        assert_eq!(extracted, wg_pk);
+    }
+
+    #[test]
+    fn generate_wg_cert_has_ca_flag() {
+        let wg_pk = [1u8; 32];
+        let (cert_der, _) = generate_wg_cert(&wg_pk).unwrap();
+        let (_, cert) = x509_parser::parse_x509_certificate(&cert_der).unwrap();
+        let bc = cert.basic_constraints().unwrap().unwrap();
+        assert!(bc.value.ca);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

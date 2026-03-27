@@ -31,10 +31,12 @@ rustls = { workspace = true, optional = true }
 rcgen = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
+x509-parser = { version = "0.16", optional = true }
+base64 = { version = "0.22", optional = true }
 
 [features]
 default = ["quic"]
-quic = ["dep:quinn", "dep:rustls", "dep:rcgen", "dep:serde", "dep:serde_json"]
+quic = ["dep:quinn", "dep:rustls", "dep:rcgen", "dep:serde", "dep:serde_json", "dep:x509-parser", "dep:base64"]
 
 [dev-dependencies]
 proptest = { workspace = true }
