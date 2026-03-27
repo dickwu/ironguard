@@ -1,0 +1,28 @@
+{
+  "$schema": "ironguard/v1",
+  "interfaces": {
+    "utun9": {
+      "private_key_file": "/etc/ironguard/private.key",
+      "listen_port": 51820,
+      "address": ["10.0.0.1/24"],
+      "mtu": 1420,
+      "masquerade": ["en0"],
+      "post_up": [
+        "echo 'IronGuard tunnel %i is up' >> /var/log/ironguard.log"
+      ],
+      "post_down": [
+        "echo 'IronGuard tunnel %i is down' >> /var/log/ironguard.log"
+      ],
+      "quic": {
+        "port": 51821
+      },
+      "peers": [
+        {
+          "public_key": "PEER_PUBLIC_KEY_HEX",
+          "allowed_ips": ["10.0.0.2/32"],
+          "persistent_keepalive": 25
+        }
+      ]
+    }
+  }
+}

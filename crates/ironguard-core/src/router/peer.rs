@@ -9,6 +9,7 @@ use super::constants::MAX_QUEUED_PACKETS;
 use super::device::{DecryptionState, Device, EncryptionState};
 use super::queue::Queue;
 use super::receive::ReceiveJob;
+use super::route::RoutingTable;
 use super::send::SendJob;
 use super::types::{Callbacks, RouterError};
 use super::worker::JobUnion;
@@ -42,6 +43,9 @@ pub struct PeerInner<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWrite
     pub(super) keys: Mutex<KeyWheel>,
     pub(super) enc_key: Mutex<Option<EncryptionState>>,
     pub(super) endpoint: Mutex<Option<E>>,
+    /// Optional per-peer ACL filter on destination addresses.
+    /// When `Some`, only packets whose destination matches this table are allowed.
+    pub acl_destinations: spin::RwLock<Option<RoutingTable<()>>>,
 }
 
 impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> Deref
@@ -211,6 +215,7 @@ pub fn new_peer<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>>
                 retired: vec![],
             }),
             staged_packets: spin::Mutex::new(ArrayDeque::new()),
+            acl_destinations: spin::RwLock::new(None),
         }),
     };
 
@@ -456,5 +461,14 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> PeerHandle
 
     pub fn purge_staged_packets(&self) {
         self.peer.staged_packets.lock().clear();
+    }
+
+    /// Set the per-peer ACL destination filter.
+    ///
+    /// When `Some`, only packets whose destination matches the routing table
+    /// are allowed through (both send and receive paths). `None` disables
+    /// filtering (all destinations allowed).
+    pub fn set_acl_destinations(&self, acl: Option<RoutingTable<()>>) {
+        *self.peer.inner.acl_destinations.write() = acl;
     }
 }

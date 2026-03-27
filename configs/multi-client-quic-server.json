@@ -1,0 +1,45 @@
+{
+  "$schema": "ironguard/v1",
+  "interfaces": {
+    "utun9": {
+      "private_key_file": "/etc/ironguard/private.key",
+      "listen_port": 2333,
+      "address": ["10.10.10.1/24"],
+      "mtu": 1420,
+      "masquerade": true,
+      "quic": {
+        "port": 2334,
+        "cert_file": "/etc/ironguard/quic.crt",
+        "key_file": "/etc/ironguard/quic.key",
+        "peer_certs": [
+          "/etc/ironguard/peers/client1.crt",
+          "/etc/ironguard/peers/client2.crt",
+          "/etc/ironguard/peers/client3.crt"
+        ]
+      },
+      "peers": [
+        {
+          "public_key": "CLIENT1_PUBLIC_KEY_HEX",
+          "allowed_ips": ["10.10.10.2/32"],
+          "persistent_keepalive": 25,
+          "acl": {
+            "allow_destinations": ["10.10.10.0/24"]
+          }
+        },
+        {
+          "public_key": "CLIENT2_PUBLIC_KEY_HEX",
+          "allowed_ips": ["10.10.10.3/32"],
+          "persistent_keepalive": 25,
+          "acl": {
+            "allow_destinations": ["10.10.10.0/24", "192.168.2.0/24"]
+          }
+        },
+        {
+          "public_key": "CLIENT3_PUBLIC_KEY_HEX",
+          "allowed_ips": ["10.10.10.4/32"],
+          "persistent_keepalive": 25
+        }
+      ]
+    }
+  }
+}

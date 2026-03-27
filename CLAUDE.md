@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-IronGuard is a modern, cross-platform WireGuard implementation in pure Rust (edition 2024). It implements crypto-key routing, anti-replay, per-peer timers with a v2 high-performance pipeline (AES-256-GCM AEAD), QUIC-based session management for key exchange, and post-quantum key exchange (ML-KEM-768). IronGuard uses its own QUIC-based protocol — there is no legacy Noise_IKpsk2 handshake module.
+IronGuard is a modern, cross-platform WireGuard implementation in pure Rust (edition 2024). It implements crypto-key routing, anti-replay, per-peer timers with a v2 high-performance pipeline (AES-256-GCM AEAD), QUIC-based session management for key exchange, and post-quantum key exchange (ML-KEM-768). IronGuard uses its own QUIC-based protocol for session establishment and rekeying.
 
 Currently supports macOS (utun via tun-rs). Linux planned. Requires Rust 1.85+.
 
@@ -52,7 +52,9 @@ Three async trait families abstract all OS I/O:
 - **`Endpoint`** (`endpoint.rs`) — `from_address` / `to_address` / `clear_src`. Carried through the stack to track peer addresses.
 - **`PlatformCapabilities`** (`capabilities.rs`) — runtime-detected I/O capabilities (sendmmsg, GSO/GRO, multi-queue TUN) used by the pipeline to select optimal code paths.
 
-Implementations: `macos/` (real utun + UDP sockets), `linux/` (planned), `dummy/` (in-memory for testing), `quic.rs` (QUIC transport behind `quic` feature).
+- **`NetworkManager`** (`network_manager.rs`) -- trait for OS-level network configuration: address assignment, route installation, masquerade NAT, and post_up/post_down hook execution. Implementations in `macos/`, `linux/`, and `dummy/`.
+
+Implementations: `macos/` (real utun + UDP sockets + pfctl NAT), `linux/` (TUN + iptables NAT), `dummy/` (in-memory for testing), `quic.rs` (QUIC transport behind `quic` feature).
 
 The dummy backend enables full-stack protocol testing without root or real sockets.
 

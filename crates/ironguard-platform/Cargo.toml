@@ -10,6 +10,7 @@ rust-version.workspace = true
 quic = ["dep:quinn", "dep:rustls", "dep:rcgen", "dep:bytes"]
 
 [dependencies]
+anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 parking_lot = { workspace = true }
@@ -25,6 +26,7 @@ libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 tun-rs = { workspace = true }
+tempfile = "3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 tun-rs = { workspace = true }

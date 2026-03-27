@@ -6,7 +6,9 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 
-use ironguard_config::types::{Config, InterfaceConfig, PeerConfig, PostQuantumMode};
+use ironguard_config::types::{
+    Config, InterfaceConfig, Masquerade, PeerConfig, PostQuantumMode, QuicConfig,
+};
 use ironguard_config::{load_preshared_key, load_private_key, validate};
 use ironguard_core::PublicKey;
 use ironguard_platform::dummy::tun as dummy_tun;
@@ -54,8 +56,19 @@ fn test_config_to_device_setup() {
             dns: vec![],
             mtu: Some(1420),
             fwmark: None,
-            transport: "udp".to_string(),
-            quic: None,
+            transport: None,
+            quic: Some(QuicConfig {
+                port: None,
+                sni: None,
+                alpn: None,
+                cert_path: None,
+                key_path: None,
+                mode: Default::default(),
+                datagram_only: false,
+                cert_file: None,
+                key_file: None,
+                peer_certs: Vec::new(),
+            }),
             post_quantum: PostQuantumMode::default(),
             mesh: None,
             peers: vec![
@@ -70,6 +83,7 @@ fn test_config_to_device_setup() {
                     quic_port: None,
                     role: None,
                     relay_for: Vec::new(),
+                    acl: None,
                 },
                 PeerConfig {
                     public_key: pk_b_hex.clone(),
@@ -82,8 +96,12 @@ fn test_config_to_device_setup() {
                     quic_port: None,
                     role: None,
                     relay_for: Vec::new(),
+                    acl: None,
                 },
             ],
+            masquerade: Masquerade::default(),
+            post_up: Vec::new(),
+            post_down: Vec::new(),
         },
     );
 
@@ -186,6 +204,67 @@ fn parse_cidr(s: &str) -> Option<(IpAddr, u32)> {
     Some((addr, prefix))
 }
 
+// ── Masquerade deserialization tests ──────────────────────────────────
+
+#[test]
+fn masquerade_deserialize_false() {
+    let json = r#"{"masquerade": false}"#;
+    #[derive(serde::Deserialize)]
+    struct W {
+        masquerade: Masquerade,
+    }
+    let w: W = serde_json::from_str(json).unwrap();
+    assert!(w.masquerade.is_disabled());
+}
+
+#[test]
+fn masquerade_deserialize_true() {
+    let json = r#"{"masquerade": true}"#;
+    #[derive(serde::Deserialize)]
+    struct W {
+        masquerade: Masquerade,
+    }
+    let w: W = serde_json::from_str(json).unwrap();
+    assert!(matches!(w.masquerade, Masquerade::All));
+}
+
+#[test]
+fn masquerade_deserialize_interfaces() {
+    let json = r#"{"masquerade": ["en0", "eth0"]}"#;
+    #[derive(serde::Deserialize)]
+    struct W {
+        masquerade: Masquerade,
+    }
+    let w: W = serde_json::from_str(json).unwrap();
+    match w.masquerade {
+        Masquerade::Interfaces(v) => assert_eq!(v, vec!["en0", "eth0"]),
+        other => panic!("expected Interfaces, got {:?}", other),
+    }
+}
+
+#[test]
+fn masquerade_deserialize_absent() {
+    let json = r#"{}"#;
+    #[derive(serde::Deserialize)]
+    struct W {
+        #[serde(default)]
+        masquerade: Masquerade,
+    }
+    let w: W = serde_json::from_str(json).unwrap();
+    assert!(w.masquerade.is_disabled());
+}
+
+#[test]
+fn masquerade_deserialize_null_rejected() {
+    let json = r#"{"masquerade": null}"#;
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
+    struct W {
+        masquerade: Masquerade,
+    }
+    assert!(serde_json::from_str::<W>(json).is_err());
+}
+
 /// Test that .conf import -> wg.json -> device setup works end-to-end.
 #[test]
 fn test_conf_import_to_device() {
@@ -240,4 +319,65 @@ fn test_conf_import_to_device() {
     assert!(wg.get_peer_handle(&pk).is_some());
 
     wg.down();
+}
+
+// -- PeerAcl tests --
+
+#[test]
+fn peer_acl_deserialize() {
+    let json = r#"{"acl": {"allow_destinations": ["10.0.0.0/24", "192.168.1.0/24"]}}"#;
+    #[derive(serde::Deserialize)]
+    struct W {
+        acl: Option<ironguard_config::PeerAcl>,
+    }
+    let w: W = serde_json::from_str(json).unwrap();
+    let acl = w.acl.unwrap();
+    assert_eq!(
+        acl.allow_destinations,
+        vec!["10.0.0.0/24", "192.168.1.0/24"]
+    );
+}
+
+#[test]
+fn peer_acl_absent() {
+    let json = r#"{}"#;
+    #[derive(serde::Deserialize)]
+    struct W {
+        #[serde(default)]
+        acl: Option<ironguard_config::PeerAcl>,
+    }
+    let w: W = serde_json::from_str(json).unwrap();
+    assert!(w.acl.is_none());
+}
+
+#[test]
+fn post_up_down_deserialize() {
+    let json = r#"{"post_up": ["echo up %i"], "post_down": ["echo down %i"]}"#;
+    #[derive(serde::Deserialize)]
+    struct W {
+        #[serde(default)]
+        post_up: Vec<String>,
+        #[serde(default)]
+        post_down: Vec<String>,
+    }
+    let w: W = serde_json::from_str(json).unwrap();
+    assert_eq!(w.post_up, vec!["echo up %i"]);
+    assert_eq!(w.post_down, vec!["echo down %i"]);
+}
+
+#[test]
+fn quic_config_port_optional() {
+    let json = r#"{"sni": "test.com"}"#;
+    let qc: ironguard_config::types::QuicConfig = serde_json::from_str(json).unwrap();
+    assert!(qc.port.is_none());
+}
+
+#[test]
+fn quic_config_cert_fields() {
+    let json =
+        r#"{"port": 51821, "cert_file": "a.crt", "key_file": "a.key", "peer_certs": ["b.crt"]}"#;
+    let qc: ironguard_config::types::QuicConfig = serde_json::from_str(json).unwrap();
+    assert_eq!(qc.cert_file.as_deref(), Some("a.crt"));
+    assert_eq!(qc.key_file.as_deref(), Some("a.key"));
+    assert_eq!(qc.peer_certs, vec!["b.crt"]);
 }

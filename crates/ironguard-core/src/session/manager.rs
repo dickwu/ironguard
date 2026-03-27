@@ -142,9 +142,11 @@ impl SessionManager {
         data_port: u16,
         receiver_id: u32,
     ) -> Result<SessionResult, SessionError> {
-        let bind_addr = self.config.bind_addr;
+        // Use an ephemeral port for the QUIC client so the configured bind_addr
+        // port remains available for the server accept loop.
+        let client_bind: SocketAddr = (self.config.bind_addr.ip(), 0u16).into();
 
-        let mut endpoint = quinn::Endpoint::client(bind_addr)
+        let mut endpoint = quinn::Endpoint::client(client_bind)
             .map_err(|e| SessionError::QuicDatagram(format!("bind client: {e}")))?;
 
         // Use production mTLS config when we have peer cert + our own identity.

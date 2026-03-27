@@ -11,7 +11,7 @@ IronGuard is a from-scratch WireGuard implementation built on Rust 2024 edition 
 - **Async Tokio Architecture** - Non-blocking I/O with work-stealing runtime, batch-aware TUN and UDP workers, Darwin `sendmsg_x`/`recvmsg_x` and Linux `sendmmsg`/`recvmmsg` for syscall amortization
 - **NAT Traversal** (`ironguard-connect`) - STUN-based NAT detection, coordinated UDP hole punching, birthday paradox spray for symmetric NAT, UPnP port mapping, mDNS LAN auto-discovery, and QUIC-based relay fallback
 - **Cross-Platform** - macOS (utun) and Linux support with platform-specific optimizations (GSO/GRO on Linux, kernel buffer tuning on macOS)
-- **JSON Configuration** - `wg.json` format with secrets separation, multi-interface, DNS hostname endpoints
+- **JSON Configuration** - `wg.json` format with secrets separation, multi-interface, DNS hostname endpoints, masquerade NAT, post_up/post_down hooks
 - **Standard Config Interop** - Import/export standard WireGuard `.conf` files
 - **QUIC Transport** (feature-gated) - RFC 9298 MASQUE encapsulation via quinn for traversing firewalls that block UDP, with automatic datagram/stream fallback and session management
 - **Zero-Copy Data Path** - In-place transport header construction, `ring` seal_in_place, and pre-allocated buffer pooling for minimal allocation on the hot path
@@ -112,6 +112,9 @@ ironguard pubkey < private.key > public.key
 
 # Generate a pre-shared key
 ironguard genpsk > preshared.key
+
+# Generate mTLS certificate for multi-peer QUIC servers
+ironguard gen-quic-cert --key private.key --out-cert quic.crt --out-key quic.key
 ```
 
 ### Configure
@@ -144,7 +147,7 @@ Create a `wg.json` configuration file:
 }
 ```
 
-> **Note:** Config must be valid JSON — JSONC comments are not supported.
+> **Note:** Config must be valid JSON. Comments are not supported.
 
 ### Run
 
@@ -189,8 +192,14 @@ ironguard export --json wg.json --interface utun9 --output wg0.conf
 | `dns` | string[] | [] | DNS servers |
 | `mtu` | u16 | 1420 | Tunnel MTU |
 | `fwmark` | u32 | 0 | Firewall mark |
+| `masquerade` | bool/string[] | `false` | NAT outbound tunnel traffic |
+| `post_up` | string[] | `[]` | Commands to run after interface up |
+| `post_down` | string[] | `[]` | Commands to run before teardown |
 | `quic.port` | u16 | `listen_port + 1` | QUIC session handshake port |
 | `quic.sni` | string | - | TLS SNI for QUIC |
+| `quic.cert_file` | string | - | TLS cert path for mTLS |
+| `quic.key_file` | string | - | TLS key path for mTLS |
+| `quic.peer_certs` | string[] | `[]` | Trusted peer cert paths |
 | `peers` | array | [] | Peer configurations |
 
 ### Peer Fields
@@ -202,7 +211,15 @@ ironguard export --json wg.json --interface utun9 --output wg0.conf
 | `endpoint` | string | Peer endpoint (`host:port`, DNS supported) |
 | `allowed_ips` | string[] | Allowed IP ranges (CIDR) |
 | `persistent_keepalive` | u64 | Keepalive interval in seconds |
+| `acl` | object | Per-peer destination ACL |
+| `acl.allow_destinations` | string[] | Allowed destination CIDRs |
+| `pq_public_key` | string | Post-quantum public key |
+| `role` | string | Peer role |
 | `_comment` | string | Inline comment (preserved in round-trips) |
+
+### QUIC Port Convention
+
+IronGuard's QUIC session handshake uses a separate port from the data plane UDP port. Set `quic.port` in config, or omit to default to `listen_port + 1`. The client connects to the server's endpoint port + 1 for the QUIC handshake. Both ports must be reachable.
 
 ## Cryptography
 
@@ -217,7 +234,7 @@ ironguard export --json wg.json --interface utun9 --output wg0.conf
 
 ## QUIC Transport
 
-When `transport: "quic"` is set, IronGuard encapsulates WireGuard packets inside QUIC connections on port 443. This makes VPN traffic indistinguishable from normal HTTPS/HTTP3 traffic, enabling connectivity on networks that block UDP on non-standard ports.
+When QUIC is enabled, IronGuard encapsulates WireGuard packets inside QUIC connections. This makes VPN traffic indistinguishable from normal HTTPS/HTTP3 traffic, enabling connectivity on networks that block UDP on non-standard ports.
 
 - Prefers QUIC unreliable datagrams (RFC 9221) for minimum overhead
 - Falls back to length-prefixed QUIC streams if datagrams are unavailable
@@ -435,8 +452,11 @@ ironguard/
           setup.rs              #     Non-interactive setup flow
 
   configs/                      # Example configurations
-    server-wg.json              #   Server config (utun9, port 51820)
-    client-wg.json              #   Client config (utun10, port 51830)
+    simple-client-server.json   #   Minimal client-server setup
+    multi-client-quic-server.json # Multi-peer QUIC server with mTLS + ACLs
+    lan-routing-server.json     #   LAN routing with masquerade + hooks
+    systemd/ironguard@.service  #   Systemd template unit
+    launchd/net.ironguard.plist #   macOS launchd plist
 
   scripts/
     install.sh                  # curl-pipe-bash installer (Linux + macOS)
