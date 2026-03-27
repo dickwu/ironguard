@@ -1,3 +1,4 @@
+use serde::de::{self, Deserializer, Visitor};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -124,4 +125,70 @@ pub struct PeerConfig {
 
 fn default_transport() -> String {
     "udp".to_string()
+}
+
+/// Controls whether outbound masquerading (NAT) is applied to tunnel traffic.
+///
+/// - `Disabled` — no masquerading (default when absent or `false`)
+/// - `All` — masquerade on all interfaces (`true`)
+/// - `Interfaces(vec)` — masquerade only on the listed interfaces (`["en0", "eth0"]`)
+///
+/// JSON `null` is intentionally rejected to force an explicit choice.
+#[derive(Clone, Debug, Default)]
+pub enum Masquerade {
+    #[default]
+    Disabled,
+    All,
+    Interfaces(Vec<String>),
+}
+
+impl Masquerade {
+    pub fn is_disabled(&self) -> bool {
+        matches!(self, Masquerade::Disabled)
+    }
+}
+
+impl Serialize for Masquerade {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Masquerade::Disabled => serializer.serialize_bool(false),
+            Masquerade::All => serializer.serialize_bool(true),
+            Masquerade::Interfaces(v) => v.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Masquerade {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct MasqueradeVisitor;
+
+        impl<'de> Visitor<'de> for MasqueradeVisitor {
+            type Value = Masquerade;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("false, true, or array of interface names")
+            }
+
+            fn visit_bool<E: de::Error>(self, v: bool) -> Result<Masquerade, E> {
+                Ok(if v {
+                    Masquerade::All
+                } else {
+                    Masquerade::Disabled
+                })
+            }
+
+            fn visit_seq<A: de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Masquerade, A::Error> {
+                let mut ifaces = Vec::new();
+                while let Some(s) = seq.next_element::<String>()? {
+                    ifaces.push(s);
+                }
+                Ok(Masquerade::Interfaces(ifaces))
+            }
+        }
+
+        deserializer.deserialize_any(MasqueradeVisitor)
+    }
 }

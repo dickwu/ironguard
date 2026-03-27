@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 
-use ironguard_config::types::{Config, InterfaceConfig, PeerConfig, PostQuantumMode};
+use ironguard_config::types::{Config, InterfaceConfig, Masquerade, PeerConfig, PostQuantumMode};
 use ironguard_config::{load_preshared_key, load_private_key, validate};
 use ironguard_core::PublicKey;
 use ironguard_platform::dummy::tun as dummy_tun;
@@ -184,6 +184,67 @@ fn parse_cidr(s: &str) -> Option<(IpAddr, u32)> {
     let addr: IpAddr = addr_str.parse().ok()?;
     let prefix: u32 = prefix_str.parse().ok()?;
     Some((addr, prefix))
+}
+
+// ── Masquerade deserialization tests ──────────────────────────────────
+
+#[test]
+fn masquerade_deserialize_false() {
+    let json = r#"{"masquerade": false}"#;
+    #[derive(serde::Deserialize)]
+    struct W {
+        masquerade: Masquerade,
+    }
+    let w: W = serde_json::from_str(json).unwrap();
+    assert!(w.masquerade.is_disabled());
+}
+
+#[test]
+fn masquerade_deserialize_true() {
+    let json = r#"{"masquerade": true}"#;
+    #[derive(serde::Deserialize)]
+    struct W {
+        masquerade: Masquerade,
+    }
+    let w: W = serde_json::from_str(json).unwrap();
+    assert!(matches!(w.masquerade, Masquerade::All));
+}
+
+#[test]
+fn masquerade_deserialize_interfaces() {
+    let json = r#"{"masquerade": ["en0", "eth0"]}"#;
+    #[derive(serde::Deserialize)]
+    struct W {
+        masquerade: Masquerade,
+    }
+    let w: W = serde_json::from_str(json).unwrap();
+    match w.masquerade {
+        Masquerade::Interfaces(v) => assert_eq!(v, vec!["en0", "eth0"]),
+        other => panic!("expected Interfaces, got {:?}", other),
+    }
+}
+
+#[test]
+fn masquerade_deserialize_absent() {
+    let json = r#"{}"#;
+    #[derive(serde::Deserialize)]
+    struct W {
+        #[serde(default)]
+        masquerade: Masquerade,
+    }
+    let w: W = serde_json::from_str(json).unwrap();
+    assert!(w.masquerade.is_disabled());
+}
+
+#[test]
+fn masquerade_deserialize_null_rejected() {
+    let json = r#"{"masquerade": null}"#;
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
+    struct W {
+        masquerade: Masquerade,
+    }
+    assert!(serde_json::from_str::<W>(json).is_err());
 }
 
 /// Test that .conf import -> wg.json -> device setup works end-to-end.
