@@ -34,11 +34,11 @@ pub struct DeviceInner<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWri
     pub(super) outbound_enabled: RwLock<bool>,
     pub(super) outbound_ready: AtomicBool,
 
-    // bounded channel for TUN writes (decrypted packets)
-    pub(super) tun_write_tx: tokio_mpsc::Sender<Vec<u8>>,
+    // bounded channel for TUN writes (buffer, IP-data offset)
+    pub(super) tun_write_tx: tokio_mpsc::Sender<(Vec<u8>, usize)>,
 
-    // bounded channel for UDP writes (encrypted packets + endpoint)
-    pub(super) udp_write_tx: tokio_mpsc::Sender<(Vec<u8>, E)>,
+    // bounded channel for UDP writes (buffer, wire-data offset, endpoint)
+    pub(super) udp_write_tx: tokio_mpsc::Sender<(Vec<u8>, usize, E)>,
 
     // routing
     #[allow(clippy::type_complexity)]
@@ -120,8 +120,8 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> Drop
 impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> DeviceHandle<E, C, T, B> {
     pub fn new(
         num_workers: usize,
-        tun_write_tx: tokio_mpsc::Sender<Vec<u8>>,
-        udp_write_tx: tokio_mpsc::Sender<(Vec<u8>, E)>,
+        tun_write_tx: tokio_mpsc::Sender<(Vec<u8>, usize)>,
+        udp_write_tx: tokio_mpsc::Sender<(Vec<u8>, usize, E)>,
     ) -> DeviceHandle<E, C, T, B> {
         let (work, mut consumers) = ParallelQueue::new(num_workers, PARALLEL_QUEUE_SIZE);
 
@@ -158,10 +158,11 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> DeviceHand
     pub fn send_raw(&self, msg: &[u8], dst: &mut E) -> Result<(), RouterError> {
         if *self.state.outbound_enabled.read() && self.state.outbound_ready.load(Ordering::Acquire)
         {
+            // Offset 0: the entire buffer is wire data (handshake messages).
             let _ = self
                 .state
                 .udp_write_tx
-                .try_send((msg.to_vec(), dst.clone()));
+                .try_send((msg.to_vec(), 0, dst.clone()));
         }
         Ok(())
     }
@@ -175,7 +176,7 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> DeviceHand
         if *self.state.outbound_enabled.read() && self.state.outbound_ready.load(Ordering::Acquire)
         {
             let ep = E::from_address(target);
-            let _ = self.state.udp_write_tx.try_send((msg, ep));
+            let _ = self.state.udp_write_tx.try_send((msg, 0, ep));
         }
     }
 

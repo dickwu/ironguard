@@ -53,21 +53,25 @@ pub trait UdpWriter<E: Endpoint>: Send + Sync + 'static {
 
     /// Send multiple datagrams in a batch, returning the number sent.
     ///
+    /// Each entry is `(buffer, byte_offset, destination)`. Wire data starts
+    /// at `buffer[offset..]`, allowing the caller to skip a prefix (e.g. the
+    /// v2 frame header) without a per-packet memmove.
+    ///
     /// The default implementation falls back to individual `write()` calls.
     /// Platform-specific implementations (e.g. macOS sendmsg_x, Linux
     /// sendmmsg) override this with a single-syscall batch send.
     fn write_batch<'a>(
         &'a self,
-        msgs: &'a [(Vec<u8>, SocketAddr)],
+        msgs: &'a [(&[u8], usize, SocketAddr)],
     ) -> impl Future<Output = Result<usize, Self::Error>> + Send + 'a
     where
         E: Endpoint,
     {
         async move {
             let mut sent = 0usize;
-            for (buf, addr) in msgs {
-                let mut ep = E::from_address(*addr);
-                match self.write(buf, &mut ep).await {
+            for &(buf, offset, addr) in msgs {
+                let mut ep = E::from_address(addr);
+                match self.write(&buf[offset..], &mut ep).await {
                     Ok(()) => sent += 1,
                     Err(e) => {
                         if sent == 0 {

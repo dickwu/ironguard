@@ -71,7 +71,11 @@ impl DarwinBatchIo {
     /// Send multiple datagrams in a single syscall.
     /// Returns the number of messages sent, or falls back to
     /// looped sendto if batch is unavailable.
-    pub fn send_batch(&self, fd: RawFd, msgs: &[(Vec<u8>, SocketAddr)]) -> io::Result<usize> {
+    ///
+    /// Each entry is `(buffer, byte_offset, destination)`. Wire data starts
+    /// at `buffer[offset..]`, allowing the caller to skip a prefix without
+    /// a per-packet memmove.
+    pub fn send_batch(&self, fd: RawFd, msgs: &[(&[u8], usize, SocketAddr)]) -> io::Result<usize> {
         if let Some(sendmsg_x) = self.sendmsg_x {
             self.send_batch_x(sendmsg_x, fd, msgs)
         } else {
@@ -98,7 +102,7 @@ impl DarwinBatchIo {
         &self,
         sendmsg_x: SendmsgXFn,
         fd: RawFd,
-        msgs: &[(Vec<u8>, SocketAddr)],
+        msgs: &[(&[u8], usize, SocketAddr)],
     ) -> io::Result<usize> {
         if msgs.is_empty() {
             return Ok(0);
@@ -110,10 +114,11 @@ impl DarwinBatchIo {
         let mut addrs: Vec<libc::sockaddr_storage> = Vec::with_capacity(count);
         let mut addr_lens: Vec<libc::socklen_t> = Vec::with_capacity(count);
 
-        for (data, addr) in msgs.iter().take(count) {
+        for &(data, offset, ref addr) in msgs.iter().take(count) {
+            // Point iov_base past the offset — avoids a memmove in the caller.
             iovecs.push(libc::iovec {
-                iov_base: data.as_ptr() as *mut libc::c_void,
-                iov_len: data.len(),
+                iov_base: unsafe { data.as_ptr().add(offset) as *mut libc::c_void },
+                iov_len: data.len() - offset,
             });
 
             let (sa, sa_len) = socket_addr_to_raw(addr);
@@ -143,15 +148,20 @@ impl DarwinBatchIo {
         }
     }
 
-    fn send_batch_fallback(&self, fd: RawFd, msgs: &[(Vec<u8>, SocketAddr)]) -> io::Result<usize> {
+    fn send_batch_fallback(
+        &self,
+        fd: RawFd,
+        msgs: &[(&[u8], usize, SocketAddr)],
+    ) -> io::Result<usize> {
         let mut sent = 0;
-        for (data, addr) in msgs {
+        for &(data, offset, ref addr) in msgs {
+            let wire = &data[offset..];
             let (sa, sa_len) = socket_addr_to_raw(addr);
             let n = unsafe {
                 libc::sendto(
                     fd,
-                    data.as_ptr() as *const libc::c_void,
-                    data.len(),
+                    wire.as_ptr() as *const libc::c_void,
+                    wire.len(),
                     0,
                     &sa as *const _ as *const libc::sockaddr,
                     sa_len,

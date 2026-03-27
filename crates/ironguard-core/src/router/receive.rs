@@ -103,13 +103,7 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> ParallelJo
 
                 let packet = &mut msg.1[HEADER_SIZE..];
                 match key.open_in_place(nonce, Aad::from(&aad_bytes[..]), packet) {
-                    Ok(_) => {
-                        tracing::debug!(
-                            counter = counter,
-                            payload_len = packet.len() - SIZE_TAG,
-                            "recv_job: decryption succeeded"
-                        );
-                    }
+                    Ok(_) => {}
                     Err(_) => {
                         tracing::debug!(
                             counter = counter,
@@ -190,6 +184,8 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> Sequential
 
         // check if should be written to TUN
         let packet = &msg.1[HEADER_SIZE..];
+        // Capture received message size before modifying the buffer.
+        let received_len = msg.1.len();
         if let Some(inner) = inner_length(packet) {
             if inner + SIZE_TAG <= packet.len() {
                 // If forwarding is enabled, check whether the destination
@@ -218,12 +214,17 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> Sequential
                     }
                 }
 
-                let buf = packet[..inner].to_vec();
-                let _ = peer.device.tun_write_tx.try_send(buf);
+                // Truncate trailing AEAD tag and padding, then pass the
+                // buffer with an offset to the TUN write worker. This avoids
+                // the drain(..HEADER_SIZE) memmove (~1404 bytes per packet).
+                let inner_end = HEADER_SIZE + inner;
+                msg.1.truncate(inner_end);
+                let buf = std::mem::take(&mut msg.1);
+                let _ = peer.device.tun_write_tx.try_send((buf, HEADER_SIZE));
             }
         }
 
-        // trigger callback
-        C::recv(&peer.opaque, msg.1.len(), true, &job.state.keypair);
+        // trigger callback (use captured length since buffer may have been taken)
+        C::recv(&peer.opaque, received_len, true, &job.state.keypair);
     }
 }

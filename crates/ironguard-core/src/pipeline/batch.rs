@@ -14,6 +14,11 @@ pub const DEFAULT_BATCH_MAX_COUNT: usize = 64;
 pub const DEFAULT_BATCH_MAX_BYTES: usize = 65536;
 
 /// Default flush timeout in microseconds.
+///
+/// 50us keeps the write workers responsive enough to drain the TUN/UDP
+/// channels at line rate. Higher values (e.g., 250us) improve batch sizes
+/// for the UDP write path but starve the TUN write path, causing packet
+/// drops in the download direction.
 pub const DEFAULT_BATCH_FLUSH_TIMEOUT_US: u64 = 50;
 
 /// Collects `PacketRef` values and flushes them as a batch when a count,

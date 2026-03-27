@@ -15,6 +15,14 @@ pub trait Status: Send + 'static {
 pub trait Writer: Send + Sync + 'static {
     type Error: Error;
     fn write(&self, src: &[u8]) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
+    /// Attempt a non-blocking write. Returns `Err` with `WouldBlock` if the
+    /// device is not immediately ready. The default implementation always
+    /// returns `WouldBlock` so that implementations that do not support
+    /// non-blocking writes fall back gracefully to the async path.
+    fn try_write(&self, _src: &[u8]) -> Result<(), std::io::Error> {
+        Err(std::io::Error::from(std::io::ErrorKind::WouldBlock))
+    }
 }
 
 pub trait Reader: Send + 'static {

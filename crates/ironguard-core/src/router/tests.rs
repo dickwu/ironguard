@@ -204,15 +204,16 @@ fn make_test_router(
     tun_writer: dummy_tun::DummyTunWriter,
     udp_writer: dummy_udp::DummyUdpWriter,
 ) -> TestRouter {
-    let (tun_tx, tun_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(TEST_CHANNEL_CAP);
+    let (tun_tx, tun_rx) = tokio::sync::mpsc::channel::<(Vec<u8>, usize)>(TEST_CHANNEL_CAP);
     let (udp_tx, udp_rx) =
-        tokio::sync::mpsc::channel::<(Vec<u8>, dummy_udp::DummyEndpoint)>(TEST_CHANNEL_CAP);
+        tokio::sync::mpsc::channel::<(Vec<u8>, usize, dummy_udp::DummyEndpoint)>(TEST_CHANNEL_CAP);
 
     let router: TestRouter = DeviceHandle::new(1, tun_tx, udp_tx);
 
     // Spawn write workers on the current Tokio runtime.
-    tokio::spawn(tun_write_worker(tun_rx, tun_writer));
-    tokio::spawn(udp_write_worker(udp_rx, udp_writer));
+    let pool = std::sync::Arc::new(crate::pipeline::vec_pool::VecPool::default());
+    tokio::spawn(tun_write_worker(tun_rx, tun_writer, pool.clone()));
+    tokio::spawn(udp_write_worker(udp_rx, udp_writer, pool));
 
     // Mark outbound as ready (writer is now available via the channel).
     router.set_outbound_ready();

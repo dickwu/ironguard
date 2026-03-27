@@ -225,14 +225,15 @@ fn make_bench_router(
     tun_writer: dummy_tun::DummyTunWriter,
     udp_writer: dummy_udp::DummyUdpWriter,
 ) -> BenchRouter {
-    let (tun_tx, tun_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(BENCH_CHANNEL_CAP);
+    let (tun_tx, tun_rx) = tokio::sync::mpsc::channel::<(Vec<u8>, usize)>(BENCH_CHANNEL_CAP);
     let (udp_tx, udp_rx) =
-        tokio::sync::mpsc::channel::<(Vec<u8>, dummy_udp::DummyEndpoint)>(BENCH_CHANNEL_CAP);
+        tokio::sync::mpsc::channel::<(Vec<u8>, usize, dummy_udp::DummyEndpoint)>(BENCH_CHANNEL_CAP);
 
     let router: BenchRouter = DeviceHandle::new(num_cpus::get(), tun_tx, udp_tx);
 
-    rt.spawn(tun_write_worker(tun_rx, tun_writer));
-    rt.spawn(udp_write_worker(udp_rx, udp_writer));
+    let pool = std::sync::Arc::new(ironguard_core::pipeline::vec_pool::VecPool::default());
+    rt.spawn(tun_write_worker(tun_rx, tun_writer, pool.clone()));
+    rt.spawn(udp_write_worker(udp_rx, udp_writer, pool));
 
     router.set_outbound_ready();
     router

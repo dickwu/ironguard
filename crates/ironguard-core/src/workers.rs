@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -9,6 +10,7 @@ use crate::constants::{
 };
 use crate::device::WireGuard;
 use crate::pipeline::batch::{DEFAULT_BATCH_FLUSH_TIMEOUT_US, DEFAULT_BATCH_MAX_COUNT};
+use crate::pipeline::vec_pool::VecPool;
 use crate::router::messages_v2;
 use crate::router::relay::RelayTable;
 use crate::types::PublicKey;
@@ -54,7 +56,17 @@ pub async fn tun_worker<T: tun::Tun, B: udp::Udp>(wg: WireGuard<T, B>, reader: T
         // when the device MTU is temporarily 0 (not yet up).
         let alloc_mtu = wg.mtu.load(Ordering::Relaxed).max(1500);
         let size = alloc_mtu + SIZE_MESSAGE_PREFIX + 1;
-        let mut msg: Vec<u8> = vec![0; size + CAPACITY_MESSAGE_POSTFIX];
+
+        // Allocate from the recycling Vec pool instead of the heap.
+        // The buffer may contain stale data from a previous packet, which
+        // is safe because:
+        //  - Bytes 0..SIZE_MESSAGE_PREFIX: overwritten by the v2 frame
+        //    header in send.rs, then drained before transmission.
+        //  - Bytes SIZE_MESSAGE_PREFIX..SIZE_MESSAGE_PREFIX+payload:
+        //    overwritten by the TUN read below.
+        //  - Padding bytes after the payload: explicitly zeroed below.
+        //  - AEAD tag space: overwritten by seal_in_place in send.rs.
+        let mut msg = wg.vec_pool.alloc_uninit(size + CAPACITY_MESSAGE_POSTFIX);
 
         let payload = match reader.read(&mut msg[..], SIZE_MESSAGE_PREFIX).await {
             Ok(payload) => payload,
@@ -68,6 +80,13 @@ pub async fn tun_worker<T: tun::Tun, B: udp::Udp>(wg: WireGuard<T, B>, reader: T
         }
 
         let padded = padding(payload, mtu);
+
+        // Zero the padding bytes to prevent leaking stale data from a
+        // recycled buffer. These bytes are encrypted and sent on the wire.
+        if padded > payload {
+            msg[SIZE_MESSAGE_PREFIX + payload..SIZE_MESSAGE_PREFIX + padded].fill(0);
+        }
+
         msg.truncate(SIZE_MESSAGE_PREFIX + padded);
 
         let _ = wg.router.send(msg);
@@ -165,6 +184,9 @@ pub async fn udp_worker_with_relay<T: tun::Tun, B: udp::Udp>(
     reader: B::Reader,
     relay_table: Option<RelayTable>,
 ) {
+    // Pre-allocated outer Vec — reused across iterations to avoid per-batch alloc.
+    let mut bufs: Vec<Vec<u8>> = Vec::with_capacity(MAX_RECV_BATCH);
+
     loop {
         // Use current MTU for buffer sizing; add MAX_HANDSHAKE_MSG_SIZE
         // so the buffer is always large enough for handshake messages.
@@ -176,8 +198,9 @@ pub async fn udp_worker_with_relay<T: tun::Tun, B: udp::Udp>(
         let pending = reader.pending_recv_count().unwrap_or(1) as usize;
         let batch_size = pending.clamp(1, MAX_RECV_BATCH);
 
-        // Allocate buffers for the batch.
-        let mut bufs: Vec<Vec<u8>> = (0..batch_size).map(|_| vec![0u8; size]).collect();
+        // Fill the reused Vec with pool-allocated buffers for this batch.
+        bufs.clear();
+        bufs.extend((0..batch_size).map(|_| wg.vec_pool.alloc_uninit(size)));
 
         // Read a batch of datagrams. This waits for at least one packet
         // (blocking), then reads up to batch_size packets if available.
@@ -189,6 +212,10 @@ pub async fn udp_worker_with_relay<T: tun::Tun, B: udp::Udp>(
         // Re-read MTU after the (potentially blocking) read returns.
         let mtu = wg.mtu.load(Ordering::Relaxed);
         if mtu == 0 {
+            // Recycle all buffers since we're not dispatching any packets.
+            for buf in bufs.drain(..) {
+                wg.vec_pool.recycle(buf);
+            }
             continue;
         }
 
@@ -197,6 +224,14 @@ pub async fn udp_worker_with_relay<T: tun::Tun, B: udp::Udp>(
             let mut msg = std::mem::take(&mut bufs[i]);
             msg.truncate(n);
             dispatch_udp_message(&wg, msg, src, relay_table.as_ref());
+        }
+
+        // Recycle unused buffers (indices beyond results.len() still hold
+        // their original allocation; consumed indices are empty from take).
+        for buf in bufs.drain(..) {
+            if buf.capacity() > 0 {
+                wg.vec_pool.recycle(buf);
+            }
         }
     }
 }
@@ -210,13 +245,17 @@ pub async fn udp_worker_with_relay<T: tun::Tun, B: udp::Udp>(
 /// 3. Write all collected packets in a tight loop.
 ///
 /// Runs as a Tokio task. Exits when the channel sender is dropped.
-pub async fn tun_write_worker<W: tun::Writer>(mut rx: mpsc::Receiver<Vec<u8>>, writer: W) {
-    let mut batch: Vec<Vec<u8>> = Vec::with_capacity(DEFAULT_BATCH_MAX_COUNT);
+pub async fn tun_write_worker<W: tun::Writer>(
+    mut rx: mpsc::Receiver<(Vec<u8>, usize)>,
+    writer: W,
+    vec_pool: Arc<VecPool>,
+) {
+    let mut batch: Vec<(Vec<u8>, usize)> = Vec::with_capacity(DEFAULT_BATCH_MAX_COUNT);
 
     loop {
         // Step 1: block-wait for at least one packet.
         let first = match rx.recv().await {
-            Some(buf) => buf,
+            Some(item) => item,
             None => return,
         };
         batch.push(first);
@@ -224,7 +263,7 @@ pub async fn tun_write_worker<W: tun::Writer>(mut rx: mpsc::Receiver<Vec<u8>>, w
         // Step 2: drain additional ready packets without blocking.
         while batch.len() < DEFAULT_BATCH_MAX_COUNT {
             match rx.try_recv() {
-                Ok(buf) => batch.push(buf),
+                Ok(item) => batch.push(item),
                 Err(_) => break,
             }
         }
@@ -233,12 +272,12 @@ pub async fn tun_write_worker<W: tun::Writer>(mut rx: mpsc::Receiver<Vec<u8>>, w
         // briefly before flushing to amortize syscall overhead.
         if batch.len() == 1 {
             let timeout = Duration::from_micros(DEFAULT_BATCH_FLUSH_TIMEOUT_US);
-            if let Ok(Some(buf)) = tokio::time::timeout(timeout, rx.recv()).await {
-                batch.push(buf);
+            if let Ok(Some(item)) = tokio::time::timeout(timeout, rx.recv()).await {
+                batch.push(item);
                 // Drain any further ready packets.
                 while batch.len() < DEFAULT_BATCH_MAX_COUNT {
                     match rx.try_recv() {
-                        Ok(buf) => batch.push(buf),
+                        Ok(item) => batch.push(item),
                         Err(_) => break,
                     }
                 }
@@ -246,8 +285,31 @@ pub async fn tun_write_worker<W: tun::Writer>(mut rx: mpsc::Receiver<Vec<u8>>, w
         }
 
         // Step 4: write all collected packets in a tight loop.
-        for buf in batch.drain(..) {
-            let _ = writer.write(&buf).await;
+        // The offset indicates where IP packet data starts in the buffer,
+        // allowing us to skip the v2 frame header without a memmove.
+        //
+        // For the first packet we always use the async path (registers
+        // a waker, ensures the fd is ready). For subsequent packets we
+        // try the non-blocking path first — the TUN fd is almost always
+        // write-ready and the non-blocking attempt avoids registering
+        // N-1 unnecessary futures with the tokio reactor per batch.
+        let mut first = true;
+        for (buf, offset) in batch.drain(..) {
+            let data = &buf[offset..];
+            if first {
+                let _ = writer.write(data).await;
+                first = false;
+            } else {
+                match writer.try_write(data) {
+                    Ok(()) => {}
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        let _ = writer.write(data).await;
+                    }
+                    Err(_) => {}
+                }
+            }
+            // Return the buffer to the pool for reuse by the next read cycle.
+            vec_pool.recycle(buf);
         }
     }
 }
@@ -266,10 +328,17 @@ pub async fn tun_write_worker<W: tun::Writer>(mut rx: mpsc::Receiver<Vec<u8>>, w
 ///
 /// Runs as a Tokio task. Exits when the channel sender is dropped.
 pub async fn udp_write_worker<E: Endpoint, W: UdpWriter<E>>(
-    mut rx: mpsc::Receiver<(Vec<u8>, E)>,
+    mut rx: mpsc::Receiver<(Vec<u8>, usize, E)>,
     writer: W,
+    vec_pool: Arc<VecPool>,
 ) {
-    let mut batch: Vec<(Vec<u8>, E)> = Vec::with_capacity(DEFAULT_BATCH_MAX_COUNT);
+    let mut batch: Vec<(Vec<u8>, usize, E)> = Vec::with_capacity(DEFAULT_BATCH_MAX_COUNT);
+    // Pre-allocated staging Vec for write_batch — avoids a heap alloc per flush.
+    // Each entry is (buffer_slice, byte_offset, destination). The offset lets
+    // sendmsg_x point iov_base directly at the wire data, eliminating the
+    // per-packet memmove that buf.drain(..offset) would require (~1452 bytes).
+    let mut msgs: Vec<(&[u8], usize, std::net::SocketAddr)> =
+        Vec::with_capacity(DEFAULT_BATCH_MAX_COUNT);
 
     loop {
         // Step 1: block-wait for at least one packet.
@@ -304,18 +373,38 @@ pub async fn udp_write_worker<E: Endpoint, W: UdpWriter<E>>(
         }
 
         // Step 4: convert endpoints to SocketAddr and send via write_batch.
+        // The offset indicates where wire data starts in the buffer.
+        // Pass (buf, offset, addr) through so sendmsg_x can point iov_base
+        // at &buf[offset] via pointer arithmetic — zero memmove per packet.
         if batch.len() == 1 {
-            // Single packet: use the direct write path to avoid the
-            // Vec<(Vec<u8>, SocketAddr)> allocation.
-            let (buf, mut dst) = batch.pop().unwrap();
-            let _ = writer.write(&buf, &mut dst).await;
+            // Single packet: use the direct write path with a slice.
+            let (buf, offset, mut dst) = batch.pop().unwrap();
+            let _ = writer.write(&buf[offset..], &mut dst).await;
+            vec_pool.recycle(buf);
         } else {
-            // Multiple packets: batch them into a single syscall.
-            let msgs: Vec<(Vec<u8>, std::net::SocketAddr)> = batch
-                .drain(..)
-                .map(|(buf, ep)| (buf, ep.to_address()))
-                .collect();
+            // Multiple packets: build offset-aware batch for sendmsg_x.
+            // No buf.drain() — the offset is passed through to the iovec,
+            // eliminating the ~1452-byte memmove per packet.
+            //
+            // SAFETY: msgs holds &[u8] slices pointing into batch's Vec<u8>
+            // buffers. batch is not modified between building msgs and
+            // clearing it (the .await only reads via write_batch). After
+            // msgs.clear(), no borrows on batch remain, so drain() is safe.
+            // The unsafe is required because Rust's async state machine
+            // cannot prove the borrows don't live across the await point.
+            msgs.clear();
+            for (buf, offset, ep) in batch.iter() {
+                let ptr = buf.as_ptr();
+                let len = buf.len();
+                let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
+                msgs.push((slice, *offset, ep.to_address()));
+            }
             let _ = writer.write_batch(&msgs).await;
+            msgs.clear();
+            // Return all buffers to the pool after the batch write.
+            for (buf, _, _) in batch.drain(..) {
+                vec_pool.recycle(buf);
+            }
         }
 
         batch.clear();

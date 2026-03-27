@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::ops::Deref;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use parking_lot::Mutex;
@@ -22,9 +22,7 @@ use ironguard_platform::tun;
 use ironguard_platform::udp;
 
 use crate::pipeline::pool::BufferPool;
-
-/// Time horizon used to initialise timestamps in the past.
-const TIME_HORIZON: std::time::Duration = std::time::Duration::from_secs(3600);
+use crate::pipeline::vec_pool::VecPool;
 
 /// Interior state shared via `Arc`.
 pub struct WireGuardInner<T: tun::Tun, B: udp::Udp> {
@@ -43,8 +41,12 @@ pub struct WireGuardInner<T: tun::Tun, B: udp::Udp> {
     // crypto-key router
     pub router: router::DeviceHandle<B::Endpoint, PeerInner<T, B>, T::Writer, B::Writer>,
 
-    // handshake queue state
-    pub last_under_load: Mutex<Instant>,
+    // handshake queue state — lock-free timestamp for under-load detection.
+    // `last_under_load_epoch` is the reference Instant (device creation time).
+    // `last_under_load_nanos` stores nanos since epoch via AtomicU64 to avoid
+    // a mutex on every handshake message (eliminates contention under flood).
+    pub last_under_load_epoch: Instant,
+    pub last_under_load_nanos: AtomicU64,
     pub pending: AtomicUsize,
     pub queue: ParallelQueue<HandshakeJob<B::Endpoint>>,
 
@@ -56,10 +58,13 @@ pub struct WireGuardInner<T: tun::Tun, B: udp::Udp> {
 
     // Receiver end of the UDP write channel, consumed when set_writer() is called.
     #[allow(clippy::type_complexity)]
-    pub udp_write_rx: Mutex<Option<tokio_mpsc::Receiver<(Vec<u8>, B::Endpoint)>>>,
+    pub udp_write_rx: Mutex<Option<tokio_mpsc::Receiver<(Vec<u8>, usize, B::Endpoint)>>>,
 
     // v2 pipeline buffer pool for zero-allocation packet processing
     pub pool: Arc<BufferPool>,
+
+    // Recycling Vec pool for hot-path I/O allocation avoidance
+    pub vec_pool: Arc<VecPool>,
 
     // Tokio handle for spawning async tasks.
     pub handle: Handle,
@@ -108,7 +113,11 @@ impl<T: tun::Tun, B: udp::Udp> WireGuard<T, B> {
     /// the fd is registered with the outer reactor while the worker polls the
     /// inner one.
     /// Bounded channel capacity for the TUN and UDP write workers.
-    const WRITE_CHANNEL_CAPACITY: usize = 256;
+    ///
+    /// At 400 Mbps with 1420-byte MTU, ~35K packets/sec flow through
+    /// the channel. 1024 provides ~29ms of buffering, enough to absorb
+    /// scheduling jitter without back-pressure stalling the crypto workers.
+    const WRITE_CHANNEL_CAPACITY: usize = 1024;
 
     pub fn new(writer: T::Writer) -> WireGuard<T, B> {
         let runtime = Runtime::new().expect("failed to create Tokio runtime");
@@ -138,9 +147,9 @@ impl<T: tun::Tun, B: udp::Udp> WireGuard<T, B> {
 
         // Create bounded channels for decoupled I/O writes.
         let (tun_write_tx, tun_write_rx) =
-            tokio_mpsc::channel::<Vec<u8>>(Self::WRITE_CHANNEL_CAPACITY);
+            tokio_mpsc::channel::<(Vec<u8>, usize)>(Self::WRITE_CHANNEL_CAPACITY);
         let (udp_write_tx, udp_write_rx) =
-            tokio_mpsc::channel::<(Vec<u8>, B::Endpoint)>(Self::WRITE_CHANNEL_CAPACITY);
+            tokio_mpsc::channel::<(Vec<u8>, usize, B::Endpoint)>(Self::WRITE_CHANNEL_CAPACITY);
 
         // crypto-key router — receives channel senders, never blocks on I/O
         let router: router::DeviceHandle<B::Endpoint, PeerInner<T, B>, T::Writer, B::Writer> =
@@ -149,26 +158,35 @@ impl<T: tun::Tun, B: udp::Udp> WireGuard<T, B> {
         // v2 pipeline buffer pool — pre-allocated buffers for zero-allocation I/O
         let pool = Arc::new(BufferPool::new());
 
+        // Recycling Vec pool — eliminates malloc/free on TUN and UDP I/O paths
+        let vec_pool = Arc::new(VecPool::default());
+
         let wg = WireGuard {
             inner: Arc::new(WireGuardInner {
                 enabled: RwLock::new(false),
                 shutdown: Notify::new(),
                 id: rand::random(),
                 mtu: AtomicUsize::new(0),
-                last_under_load: Mutex::new(Instant::now() - TIME_HORIZON),
+                last_under_load_epoch: Instant::now(),
+                last_under_load_nanos: AtomicU64::new(0),
                 router,
                 pending: AtomicUsize::new(0),
                 queue: tx,
                 peer_handles: RwLock::new(HashMap::new()),
                 udp_write_rx: Mutex::new(Some(udp_write_rx)),
                 pool,
+                vec_pool,
                 handle,
                 _owned_runtime: owned_runtime,
             }),
         };
 
         // Spawn TUN write worker — drains the channel and writes to TUN
-        wg.handle.spawn(tun_write_worker(tun_write_rx, writer));
+        wg.handle.spawn(tun_write_worker(
+            tun_write_rx,
+            writer,
+            Arc::clone(&wg.vec_pool),
+        ));
 
         // NOTE: UDP write worker is spawned lazily via set_writer(),
         // since the UDP writer is not available at device creation time.
@@ -268,7 +286,8 @@ impl<T: tun::Tun, B: udp::Udp> WireGuard<T, B> {
     pub fn set_writer(&self, writer: B::Writer) {
         // Spawn the UDP write worker with the channel receiver (consumed once).
         if let Some(rx) = self.udp_write_rx.lock().take() {
-            self.handle.spawn(udp_write_worker(rx, writer));
+            self.handle
+                .spawn(udp_write_worker(rx, writer, Arc::clone(&self.vec_pool)));
         }
 
         // Mark the outbound path as ready so crypto workers send to the channel.

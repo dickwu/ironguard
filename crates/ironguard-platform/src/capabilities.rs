@@ -36,7 +36,10 @@ impl PlatformCapabilities {
             Self {
                 tun_multi_queue: false,
                 tun_gso_gro: false,
-                udp_sendmmsg: false,
+                // macOS sendmsg_x is the equivalent of Linux sendmmsg and is
+                // probed at bind time via DarwinBatchIo::probe(). Mark it
+                // available here so callers can use the batch send path.
+                udp_sendmmsg: true,
                 udp_gso: false,
                 max_tun_queues: 1,
             }
@@ -147,7 +150,8 @@ mod tests {
         let caps = PlatformCapabilities::detect();
         assert!(!caps.tun_multi_queue);
         assert!(!caps.tun_gso_gro);
-        assert!(!caps.udp_sendmmsg);
+        // macOS sendmsg_x (equivalent of Linux sendmmsg) is available.
+        assert!(caps.udp_sendmmsg);
         assert!(!caps.udp_gso);
         assert_eq!(caps.max_tun_queues, 1);
     }

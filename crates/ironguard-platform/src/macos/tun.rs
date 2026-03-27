@@ -86,6 +86,33 @@ pub struct MacosTunWriter {
     _device: Arc<AsyncFd<TunDevice>>,
 }
 
+impl MacosTunWriter {
+    /// Perform a writev syscall directly (non-blocking, no async registration).
+    ///
+    /// Returns `Err(WouldBlock)` if the fd is not immediately ready.
+    fn writev_nonblocking(&self, src: &[u8]) -> io::Result<()> {
+        let af: u32 = match src.first().map(|b| b >> 4) {
+            Some(6) => libc::AF_INET6 as u32,
+            _ => libc::AF_INET as u32,
+        };
+        let af_bytes = af.to_be_bytes();
+        let iov = [io::IoSlice::new(&af_bytes), io::IoSlice::new(src)];
+        let fd = self.inner.get_ref().as_raw_fd();
+        let n = unsafe {
+            libc::writev(
+                fd,
+                iov.as_ptr() as *const libc::iovec,
+                iov.len() as libc::c_int,
+            )
+        };
+        if n < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+}
+
 impl tun::Writer for MacosTunWriter {
     type Error = MacosTunError;
 
@@ -123,6 +150,14 @@ impl tun::Writer for MacosTunWriter {
                 Err(_would_block) => continue,
             }
         }
+    }
+
+    /// Non-blocking write: attempt writev without registering an async waker.
+    ///
+    /// Returns `Err(WouldBlock)` if the fd is not immediately ready,
+    /// allowing the caller to fall back to the async `write()` path.
+    fn try_write(&self, src: &[u8]) -> Result<(), io::Error> {
+        self.writev_nonblocking(src)
     }
 }
 
@@ -201,12 +236,13 @@ impl tun::PlatformTun for MacosTun {
         // The default net.local.dgram.recvspace is only 8KB which can
         // cause packet drops under load.  This requires root privileges;
         // if it fails silently the tunnel still works, just with reduced buffer.
+        // 1MB provides ~88ms of buffering at 400 Mbps with 1420-byte MTU.
         match std::process::Command::new("sysctl")
-            .args(["-w", "net.local.dgram.recvspace=262144"])
+            .args(["-w", "net.local.dgram.recvspace=1048576"])
             .output()
         {
             Ok(output) if output.status.success() => {
-                tracing::debug!("increased net.local.dgram.recvspace to 262144");
+                tracing::debug!("increased net.local.dgram.recvspace to 1048576");
             }
             Ok(_) => {
                 tracing::debug!(

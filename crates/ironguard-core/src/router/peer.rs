@@ -229,9 +229,10 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> PeerInner<
                         .outbound_ready
                         .load(core::sync::atomic::Ordering::Acquire)
                 {
+                    // Offset 0: handshake messages are wire-ready (no prefix).
                     self.device
                         .udp_write_tx
-                        .try_send((msg.to_vec(), ep))
+                        .try_send((msg.to_vec(), 0, ep))
                         .map_err(|_| RouterError::SendError)
                 } else {
                     Ok(())

@@ -73,8 +73,18 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> ParallelJo
             let job = &*self.0;
             let mut msg = job.buffer.lock();
 
-            // make space for the tag at the end
-            msg.extend([0u8; SIZE_TAG].iter());
+            // Extend the buffer for the AEAD tag. In production, tun_worker
+            // pre-allocates CAPACITY_MESSAGE_POSTFIX (16) extra bytes so the
+            // fast path avoids zeroing. For test code or other callers that
+            // don't pre-size, fall back to resize.
+            let tag_end = msg.len() + SIZE_TAG;
+            if tag_end <= msg.capacity() {
+                // SAFETY: tag_end <= capacity. The 16 bytes will be
+                // overwritten by copy_from_slice below before any read.
+                unsafe { msg.set_len(tag_end) };
+            } else {
+                msg.resize(tag_end, 0);
+            }
 
             debug_assert!(
                 job.counter < REJECT_AFTER_MESSAGES,
@@ -124,13 +134,25 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> Sequential
         );
 
         let job = &self.0;
-        let msg = job.buffer.lock();
+        let mut guard = job.buffer.lock();
 
-        // Send from HEADER_OFFSET to end (header + ciphertext + tag)
-        let wire_msg = &msg[HEADER_OFFSET..];
+        if guard.len() <= HEADER_OFFSET {
+            drop(guard);
+            C::send(&job.peer.opaque, 0, false, &job.keypair, job.counter);
+            return;
+        }
+
+        // Take ownership of the buffer to avoid a per-packet heap allocation
+        // from wire_msg.to_vec(). The Mutex retains an empty Vec (no-op drop).
+        let owned = std::mem::take(&mut *guard);
+        drop(guard);
+
+        // Wire data starts at HEADER_OFFSET (v2 header + ciphertext + AEAD tag).
+        // Pass the offset to the UDP write worker instead of draining, avoiding
+        // a per-packet memmove of ~1500 bytes.
+        let wire_len = owned.len() - HEADER_OFFSET;
 
         // Dispatch to the UDP write channel (non-blocking).
-        // Look up the peer's endpoint and check if outbound is enabled.
         let xmit = {
             let endpoint = job.peer.endpoint.lock().clone();
             match endpoint {
@@ -142,19 +164,11 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> Sequential
                         .outbound_ready
                         .load(core::sync::atomic::Ordering::Acquire);
                     if enabled && ready {
-                        let ep_addr = ep.to_address();
-                        let result = job
-                            .peer
-                            .device
-                            .udp_write_tx
-                            .try_send((wire_msg.to_vec(), ep));
-                        tracing::debug!(
-                            wire_len = wire_msg.len(),
-                            endpoint = ?ep_addr,
-                            sent = result.is_ok(),
-                            counter = job.counter,
-                            "send_job: dispatched to UDP write channel"
-                        );
+                        let result =
+                            job.peer
+                                .device
+                                .udp_write_tx
+                                .try_send((owned, HEADER_OFFSET, ep));
                         result.is_ok()
                     } else {
                         tracing::debug!(
@@ -172,13 +186,6 @@ impl<E: Endpoint, C: Callbacks, T: tun::Writer, B: udp::UdpWriter<E>> Sequential
             }
         };
 
-        // Report the wire message size
-        C::send(
-            &job.peer.opaque,
-            wire_msg.len(),
-            xmit,
-            &job.keypair,
-            job.counter,
-        );
+        C::send(&job.peer.opaque, wire_len, xmit, &job.keypair, job.counter);
     }
 }
